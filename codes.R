@@ -5,11 +5,8 @@ library(SnowballC)
 library(caret)
 library(topicmodels)
 library(tidytext)
-
-# sentiment == recommended?
-# sentiment over time?
-# model weighted by hours/products
-# recommended as a label
+library(cluster)
+library(SentimentAnalysis)
 
 syberia <- fromJSON("Syberia.json", flatten=TRUE)
 syberia1.orig <- syberia %>% filter(product_id == "46500")
@@ -52,9 +49,31 @@ syberia2.TDM <- createTdmDtm(syberia2.orig$text)[[2]]
 head(sort(rowSums(as.matrix(syberia1.TDM)), T), 10)
 head(sort(rowSums(as.matrix(syberia2.TDM)), T), 10)
 
-####
-#### Models for classification
-####
+mostCommonWordsPlt <- function(DTM, sparsity = 0.9, gameName){
+  
+  freq <- colSums(as.matrix(removeSparseTerms(DTM, sparsity)))
+  
+  data.frame(word = names(freq), freq = freq) %>% 
+    subset(., freq > 30) %>%
+    ggplot(aes(x = reorder(word, -freq), freq)) + 
+    geom_bar(stat = "identity", fill = "lightblue") + 
+    theme(axis.text.x = element_text(angle=45, hjust=1)) + 
+    labs(x = "Words", y = "Frequencies", title = paste0("Words frequencies for ", gameName))
+  
+}
+
+syberia1.mostCommonPlot <- mostCommonWordsPlt(syberia1.DTM, 0.85, gameName = "Syberia 1")
+syberia2.mostCommonPlot <- mostCommonWordsPlt(syberia2.DTM, 0.85, gameName = "Syberia 2")
+
+
+findAssocs(syberia1.DTM, 
+           c("graphic", "sound", "good", "bad", "stori", "audio", "plot", "quest"),
+           corlimit = 0.4)
+findAssocs(syberia2.DTM, 
+           c("graphic", "sound", "good", "bad", "stori", "audio", "plot", "quest"),
+           corlimit = 0.4) 
+
+#### Models for classification #### 
 
 syberia1.df <- cbind(as.data.frame(data.matrix(syberia1.DTM), stringsAsfactors = FALSE), as.factor(syberia1.orig$recommended))
 syberia2.df <- cbind(as.data.frame(data.matrix(syberia2.DTM), stringsAsfactors = FALSE), as.factor(syberia2.orig$recommended))
@@ -63,7 +82,7 @@ colnames(syberia2.df)[ncol(syberia2.df)] <- "Recommended"
 
 set.seed(2137)
 syberia1.part <- createDataPartition(syberia1.df$Recommended, p = 0.8, list = F)
-syberia2.part <- createDataPartition(syberia1.df$Recommended, p = 0.8, list = F)
+syberia2.part <- createDataPartition(syberia2.df$Recommended, p = 0.8, list = F)
 
 syberia1.train <- syberia1.df[syberia1.part, c(colSums(syberia1.df[, -ncol(syberia1.df)]) > 0.8*0.025*nrow(syberia1.df), T)]
 syberia1.test <- syberia1.df[-syberia1.part, c(colSums(syberia1.df[, -ncol(syberia1.df)]) > 0.8*0.025*nrow(syberia1.df), T)]
@@ -141,59 +160,39 @@ syberia2.nb.pred <- predict(nb.model2, syberia2.test)
 confusionMatrix(syberia1.test$Recommended, syberia1.nb.pred)
 confusionMatrix(syberia2.test$Recommended, syberia2.nb.pred)
 
-####
-#### Clustering
-####
+#### Clustering #### 
 
-freq <- colSums(as.matrix(removeSparseTerms(dtm, 0.90))) 
-freq   
+hClustTM <- function(TDM, k) {
+  
+  d <- dist(removeSparseTerms(TDM, 0.85), method = "manhattan")
+  fit <- hclust(d, method = "ward.D2")    
+  plot.new()
+  plot(fit, hang=-1)
+  groups <- cutree(fit, k)  
+  rect.hclust(fit, k, border = "darkblue")
+}
 
-wf <- data.frame(word=names(freq), freq=freq)   
-p <- ggplot(subset(wf, freq>20), aes(reorder(word, -freq), freq))    
-p <- p + geom_bar(stat="identity")   
-p <- p + theme(axis.text.x=element_text(angle=45, hjust=1))   
-p 
+hClustTM(syberia1.TDM, 6)
+hClustTM(syberia2.TDM, 6)
 
-findAssocs(dtm, c("graphic" , "sound", "good", "stori"), corlimit=0.3) 
+kMeansTM <- function(TDM, k) {
+  
+  d <- dist(removeSparseTerms(TDM, 0.85), method = "manhattan")
+  
+  kfit <- kmeans(d, k)
+  clusplot(as.matrix(d), kfit$cluster, color=T, shade=T, labels=2, lines = 0)
+  
+}
 
+kMeansTM(syberia1.TDM, 6)
+kMeansTM(syberia2.TDM, 6)
 
+#### Topic modelling #### 
 
-
-
-##HCLUST
-
-dtms <- removeSparseTerms(dtm, 0.9)
-library(cluster)   
-d <- dist(t(dtms), method="euclidian")   
-fit <- hclust(d=d, method="complete")    
-plot.new()
-plot(fit, hang=-1)
-groups <- cutree(fit, k=6)  
-rect.hclust(fit, k=6, border="red") 
-
-
-kfit <- kmeans(d, 4)   
-clusplot(as.matrix(d), kfit$cluster, color=T, shade=T, labels=2, lines=0)
-wss <- 2:29
-for (i in 2:29) wss[i] <- sum(kmeans(d,centers=i,nstart=25)$withinss)
-plot(2:29, wss[2:29], type="b", xlab="Number of Clusters",ylab="Within groups sum of squares")
-
-
-
-## TOPIC
-## 
-## 
-
-
-top_terms_by_topic_LDA <- function(input_text, # columm from a dataframe
+top_terms_by_topic_LDA <- function(DTM, # columm from a dataframe
                                    plot = T, 
                                    number_of_topics = 4) # number of topics 
 {    
-  # corpus and document term matrix
-  Corpus <- Corpus(VectorSource(input_text)) 
-  DTM <- DocumentTermMatrix(Corpus) 
-  
-  # remove empty rows in the dtm, necessary to perform LDA 
   unique_indexes <- unique(DTM$i) # index of each unique value
   DTM <- DTM[unique_indexes,] 
   
@@ -216,20 +215,44 @@ top_terms_by_topic_LDA <- function(input_text, # columm from a dataframe
       facet_wrap(~ topic, scales = "free") + 
       labs(x = NULL, y = "Beta") + 
       coord_flip() 
-  }else{ 
+  } else{ 
     # list of sorted terms instead of a plot
     return(top_terms)
   }
 }
 
-top_terms_by_topic_LDA(syberia1.orig$text, number_of_topics = 4, plot = T)
+top_terms_by_topic_LDA(syberia1.DTM, number_of_topics = 2, plot = T)
+top_terms_by_topic_LDA(syberia2.DTM, number_of_topics = 2, plot = T)
 
 
-# sENTIMENT
-# 
-# 
+GibbsLDA <- function(DTM, k=2) {
 
-library(SentimentAnalysis)
+  burnin <- 4000
+  iter <- 2000
+  thin <- 500
+  seed <-list(2003,5,63,100001,765)
+  nstart <- 5
+  unique_indexes <- unique(DTM$i)
+  
+  ldaOut <- LDA(DTM[unique_indexes, ], k, 
+                method="Gibbs", 
+                control=list(nstart=nstart, seed = seed, best=T, burnin = burnin, iter = iter, thin=thin))
+  ldaOut.topics <- as.matrix(topics(ldaOut))
+  ldaOut.terms <- as.matrix(terms(ldaOut,3))
+  
+  list(ldaOut.topics,
+       ldaOut.terms)
+  
+}
+
+syberia1.LDA <- GibbsLDA(syberia1.DTM)
+syberia2.LDA <- GibbsLDA(syberia2.DTM)
+
+
+
+#### Sentiment modelling #### 
+
+
 sentiment <- analyzeSentiment(syberia1.orig$text)
 plotSentiment(sentiment$SentimentHE)
 convertToDirection(sentiment$SentimentQDAP)
