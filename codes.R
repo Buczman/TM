@@ -180,7 +180,106 @@ top_terms_by_topic_LDA <- function(input_text, # columm from a dataframe
   }
 }
 
-top_terms_by_topic_LDA(syberia2$text, number_of_topics = 4, plot = T)
+top_terms_by_topic_LDA(syberia1.orig$text, number_of_topics = 4, plot = T)
 
+
+# sENTIMENT
+# 
+# 
+
+library(SentimentAnalysis)
+sentiment <- analyzeSentiment(syberia1.orig$text)
+plotSentiment(sentiment$SentimentHE)
+convertToDirection(sentiment$SentimentQDAP)
+data(DictionaryGI)
+
+df <- data.frame(sentence=1:351,QDAP=sentiment$SentimentQDAP, GI=sentiment$SentimentGI)
+
+ggplot(df, aes(x=sentence, y=QDAP)) + geom_line(color="red")+geom_line(aes(x=sentence, y=GI),color="green")
+
+
+
+
+#na chart
+
+tidy_books <- syberia1.orig %>%
+  unnest_tokens(word, text)
+
+get_sentiments("nrc")[, 2] %>% unique %>% pull %>%  lapply(function(x) {
+  tidy_books %>%
+    inner_join(get_sentiments("nrc") %>% 
+                 filter(sentiment == x)) %>%
+    count(word, sort = TRUE)
+  
+})
+
+library(stringr)
+library(OneR)
+
+
+syberia1.orig$gameplay <- bin(syberia1.orig$hours, nbins = 5, na.omit = F)
+
+syberia1.words <- syberia1.orig %>%
+  unnest_tokens(word, text) %>%
+  filter(str_detect(word, "[a-z']$"),
+         !word %in% stop_words$word)
+
+syberia1.words %>%
+  count(word, sort = TRUE)
+
+words_by_recommend <- syberia1.words %>%
+  count(recommended, word, sort = TRUE) %>%
+  ungroup()
+
+words_by_gameplay <- syberia1.words %>%
+  sum(gameplay, word, sort = TRUE) %>%
+  ungroup()
+
+words_by_recommend %>% filter(!recommended)
+
+tf_idf <- words_by_recommend %>%
+  bind_tf_idf(word, recommended, n) %>%
+  arrange(desc(tf_idf))
+
+tf_idf
+
+#to jest najs
+
+tf_idf %>%
+  group_by(recommended) %>%
+  top_n(12, tf_idf) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, tf_idf)) %>%
+  ggplot(aes(word, tf_idf, fill = recommended)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ recommended, scales = "free") +
+  ylab("tf-idf") +
+  coord_flip()
+
+
+
+recommendp_sentiments <- words_by_recommend %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(recommended) %>%
+  summarize(score = sum(score * n) / sum(n))
+
+recommendp_sentiments %>%
+  mutate(recommended = reorder(recommended, score)) %>%
+  ggplot(aes(recommended, score, fill = score > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  ylab("Average sentiment score")
+
+recommendp_sentiments <- words_by_gameplay %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(gameplay) %>%
+  summarize(score = sum(score * n) / sum(n))
+
+recommendp_sentiments %>%
+  mutate(gameplay = reorder(gameplay, score)) %>%
+  ggplot(aes(gameplay, score, fill = score > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  ylab("Average sentiment score")
 
 
