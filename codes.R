@@ -15,8 +15,8 @@ syberia <- fromJSON("Syberia.json", flatten=TRUE)
 syberia1.orig <- syberia %>% filter(product_id == "46500")
 syberia2.orig <- syberia %>% filter(product_id == "46510")
 
-syberia1.orig %>%  nrow
-syberia2.orig %>%  nrow
+syberia1.orig %>% nrow
+syberia2.orig %>% nrow
 
 # tdm and dtm
 createTdmDtm <- function(text) {
@@ -53,54 +53,97 @@ head(sort(rowSums(as.matrix(syberia1.TDM)), T), 10)
 head(sort(rowSums(as.matrix(syberia2.TDM)), T), 10)
 
 ####
-#### Model
+#### Models for classification
 ####
 
-mat.df <- as.data.frame(data.matrix(dtm), stringsAsfactors = FALSE)
-mat.df <- cbind(mat.df, as.factor(syberia1.orig$recommended))
-colnames(mat.df)[ncol(mat.df)] <- "Recommended"
+syberia1.df <- cbind(as.data.frame(data.matrix(syberia1.DTM), stringsAsfactors = FALSE), as.factor(syberia1.orig$recommended))
+syberia2.df <- cbind(as.data.frame(data.matrix(syberia2.DTM), stringsAsfactors = FALSE), as.factor(syberia2.orig$recommended))
+colnames(syberia1.df)[ncol(syberia1.df)] <- "Recommended"
+colnames(syberia2.df)[ncol(syberia2.df)] <- "Recommended"
 
-syberia.part <- createDataPartition(mat.df$Recommended, p = 0.8, list = F)
-syberia.train <- mat.df[syberia.part, ]
-syberia.test <- mat.df[-syberia.part, ]
+set.seed(2137)
+syberia1.part <- createDataPartition(syberia1.df$Recommended, p = 0.8, list = F)
+syberia2.part <- createDataPartition(syberia1.df$Recommended, p = 0.8, list = F)
 
-syberia.train <- syberia.train[ ,-c(which(colnames(syberia.train) == "valadilen"))]
-syberia.train2 <- syberia.train[, c(colSums(syberia.train[, -ncol(syberia.train)]) > 0.025*nrow(syberia.train), T)]
-syberia.train3 <- upSample(syberia.train2, syberia.train2$Recommended)
-syberia.test$Class <- syberia.test$Recommended
+syberia1.train <- syberia1.df[syberia1.part, c(colSums(syberia1.df[, -ncol(syberia1.df)]) > 0.8*0.025*nrow(syberia1.df), T)]
+syberia1.test <- syberia1.df[-syberia1.part, c(colSums(syberia1.df[, -ncol(syberia1.df)]) > 0.8*0.025*nrow(syberia1.df), T)]
 
+syberia2.train <- syberia2.df[syberia2.part, c(colSums(syberia2.df[, -ncol(syberia2.df)]) > 0.8*0.025*nrow(syberia2.df), T)]
+syberia2.test <- syberia2.df[-syberia2.part, c(colSums(syberia2.df[, -ncol(syberia2.df)]) > 0.8*0.025*nrow(syberia2.df), T)]
+
+
+syberia1.train <- upSample(syberia1.train, syberia1.train$Recommended)
+syberia2.train <- upSample(syberia2.train, syberia2.train$Recommended)
+
+syberia1.train$Class <- NULL
+syberia2.train$Class <- NULL
 
 knn.grid <-  expand.grid(k = 10:20)
-knn.model <- train(Recommended ~ . ,
-                   data = syberia.train3,
+
+# SYBERIA 1
+knn.model1 <- train(Recommended ~ . ,
+                    data = syberia1.train,
+                    method = "knn",
+                    tuneGrid = knn.grid)
+
+# SYBERIA 2
+knn.model2 <- train(Recommended ~ . ,
+                   data = syberia2.train,
                    method = "knn",
                    tuneGrid = knn.grid)
 
-predictions <- predict(knn.model, syberia.test)
 
-## 92% acc najssss
-confusionMatrix(syberia.test$Class, predictions)
+syberia1.knn.pred <- predict(knn.model1, syberia1.test)
+syberia2.knn.pred <- predict(knn.model2, syberia2.test)
+
+confusionMatrix(syberia1.test$Recommended, syberia1.knn.pred)
+confusionMatrix(syberia2.test$Recommended, syberia2.knn.pred)
+
+#----------------------------------
+
+# SYBERIA 1
+svm.model1 <- train(Recommended ~ . ,
+                    data = syberia1.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+# SYBERIA 2
+svm.model2 <- train(Recommended ~ . ,
+                    data = syberia2.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
 
 
+syberia1.svm.pred <- predict(svm.model1, syberia1.test)
+syberia2.svm.pred <- predict(svm.model2, syberia2.test)
 
-svm.model <- train(Recommended ~ . ,
-                   data = syberia.train3,
-                   method = "svmLinear",
-                   preProcess = c("center", "scale"))
-## 100% XDDDDDDDDDDDDDDDD
-predictions <- predict(svm.model, syberia.test)
-confusionMatrix(syberia.test$Class, predictions)
+confusionMatrix(syberia1.test$Recommended, syberia1.svm.pred)
+confusionMatrix(syberia2.test$Recommended, syberia2.svm.pred)
 
-## 100% XDDDDDDDDDDDDDDDD
-nb.model <-  train(Recommended ~ . ,
-             data = syberia.train3,
-             method = "nb",
-             preProcess = c("center", "scale"))
+#----------------------------------
 
-predictions.nb <- predict(nb.model, syberia.test)
-confusionMatrix(syberia.test$Class, predictions)
+# SYBERIA 1
+nb.model1 <- train(Recommended ~ . ,
+                    data = syberia1.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
 
-## CLUSTERING
+# SYBERIA 2
+nb.model2 <- train(Recommended ~ . ,
+                    data = syberia2.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+
+syberia1.nb.pred <- predict(nb.model1, syberia1.test)
+syberia2.nb.pred <- predict(nb.model2, syberia2.test)
+
+confusionMatrix(syberia1.test$Recommended, syberia1.nb.pred)
+confusionMatrix(syberia2.test$Recommended, syberia2.nb.pred)
+
+####
+#### Clustering
+####
 
 freq <- colSums(as.matrix(removeSparseTerms(dtm, 0.90))) 
 freq   
