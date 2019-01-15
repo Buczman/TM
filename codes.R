@@ -5,48 +5,52 @@ library(SnowballC)
 library(caret)
 library(topicmodels)
 library(tidytext)
+
 # sentiment == recommended?
 # sentiment over time?
 # model weighted by hours/products
 # recommended as a label
 
-
 syberia <- fromJSON("Syberia.json", flatten=TRUE)
 syberia1.orig <- syberia %>% filter(product_id == "46500")
 syberia2.orig <- syberia %>% filter(product_id == "46510")
 
-
 syberia1.orig %>%  nrow
 syberia2.orig %>%  nrow
 
+# tdm and dtm
+createTdmDtm <- function(text) {
+  
+  toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
 
-syberia1 <- Corpus(VectorSource(syberia1.orig$text))
-toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
-syberia1 <- tm_map(syberia1, toSpace, "/")
-syberia1 <- tm_map(syberia1, toSpace, "@")
-syberia1 <- tm_map(syberia1, toSpace, "\\|")
-syberia1 <- tm_map(syberia1, toSpace, "???")
-syberia1 <- tm_map(syberia1, toSpace, "???")
-syberia1 <- tm_map(syberia1, toSpace, "¦")
+  corp <- Corpus(VectorSource(text))
+  corp <- tm_map(corp, toSpace, "/")
+  corp <- tm_map(corp, toSpace, "@")
+  corp <- tm_map(corp, toSpace, "\\|")
+  corp <- tm_map(corp, toSpace, "[^\x01-\x7F]")
+  corp <- tm_map(corp, toSpace, "¦")
+  corp <- tm_map(corp, stripWhitespace)
+  corp <- tm_map(corp, removePunctuation)
+  corp <- tm_map(corp, removeNumbers)
+  corp <- tm_map(corp, content_transformer(tolower))
+  corp <- tm_map(corp, removeWords, stopwords("english"))
+  corp <- tm_map(corp, stemDocument)
+  
+  dtm <- DocumentTermMatrix(corp)
+  tdm <- TermDocumentMatrix(corp)
+  
+  list(dtm, tdm)
+}
 
-syberia1 <- tm_map(syberia1, stripWhitespace)
+syberia1.DTM <- createTdmDtm(syberia1.orig$text)[[1]]
+syberia1.TDM <- createTdmDtm(syberia1.orig$text)[[2]]
 
-# remove unnecessary punctuation
-syberia1 <- tm_map(syberia1, removePunctuation)
+syberia2.DTM <- createTdmDtm(syberia2.orig$text)[[1]]
+syberia2.TDM <- createTdmDtm(syberia2.orig$text)[[2]]
 
-# remove unnecessary numbers
-syberia1 <- tm_map(syberia1, removeNumbers)
-syberia1 <- tm_map(syberia1, content_transformer(tolower))
-
-syberia1 <- tm_map(syberia1, removeWords, stopwords("english"))
-syberia1 <- tm_map(syberia1, stemDocument)
-
-
-dtm <- DocumentTermMatrix(syberia1)
-m <- as.matrix(dtm)
-v <- sort(rowSums(m),decreasing=TRUE)
-d <- data.frame(word = names(v),freq=v)
-
+#Quick peek at the most common words
+head(sort(rowSums(as.matrix(syberia1.TDM)), T), 10)
+head(sort(rowSums(as.matrix(syberia2.TDM)), T), 10)
 
 ####
 #### Model
