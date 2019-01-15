@@ -59,9 +59,11 @@ syberia.train <- mat.df[syberia.part, ]
 syberia.test <- mat.df[-syberia.part, ]
 
 syberia.train <- syberia.train[ ,-c(which(colnames(syberia.train) == "valadilen"))]
+syberia.train2 <- syberia.train[, c(colSums(syberia.train[, -ncol(syberia.train)]) > 0.1*nrow(syberia.train), T)]
 
-knn.grid <-  expand.grid(k = 1500)
+
+knn.grid <-  expand.grid(k = 20:40)
 knn.model <- train(Recommended ~ . ,
-                   data = syberia.train,
+                   data = syberia.train2,
                    method = "knn",
                    tuneGrid = knn.grid)
