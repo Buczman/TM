@@ -109,12 +109,7 @@ p
 
 findAssocs(dtm, c("graphic" , "sound", "good", "stori"), corlimit=0.3) 
 
-# Do the word clouds
-library(wordcloud)   
-dtms <- removeSparseTerms(dtm, 0.15)   
-freq <- colSums(as.matrix(dtm))   
-dark2 <- brewer.pal(6, "Dark2")   
-wordcloud(names(freq), freq, max.words=100, rot.per=0.2, colors=dark2) 
+
 
 
 
@@ -232,8 +227,13 @@ words_by_recommend <- syberia1.words %>%
   ungroup()
 
 words_by_gameplay <- syberia1.words %>%
-  sum(gameplay, word, sort = TRUE) %>%
+  count(gameplay, word, sort = TRUE) %>%
   ungroup()
+
+words_by_date <- syberia1.words %>%
+  count(date, word, sort = TRUE) %>%
+  ungroup()
+
 
 words_by_recommend %>% filter(!recommended)
 
@@ -283,3 +283,125 @@ recommendp_sentiments %>%
   ylab("Average sentiment score")
 
 
+contributions <- syberia1.words %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(word) %>%
+  summarize(occurences = n(),
+            contribution = sum(score))
+
+contributions
+contributions %>%
+  top_n(25, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip()
+
+
+
+## WORDCLOUD
+# Do the word clouds
+library(wordcloud)   
+dtms <- removeSparseTerms(dtm, 0.15)   
+freq <- colSums(as.matrix(dtm))   
+wordcloud(names(freq),
+          freq,
+          scale = c(4,1),
+          colors = brewer.pal(3, "Pastel2"),
+          rot.per = 0)
+
+
+#bigram
+
+bigrams <- syberia1.orig %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+trigrams <- syberia1.orig %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+
+
+bigrams %>%
+  count(bigram, sort = TRUE)
+
+trigrams %>%
+  count(trigram, sort = TRUE)
+
+bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word) %>%
+  count(word1, word2, sort = TRUE)
+
+trigrams %>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word3 %in% stop_words$word) %>%
+  count(word1, word2, word3, sort = TRUE)
+
+
+bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word) %>%
+  count(word1, word2, sort = TRUE) %>%
+  unite("bigram", c(word1, word2), sep = " ") %>%
+  top_n(10) %>%
+  ungroup() %>%
+  ggplot(aes(bigram, n)) +
+  geom_bar(stat = "identity", alpha = .8, show.legend = FALSE) +
+  drlib::scale_x_reordered() +
+  coord_flip()
+
+bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(word1 == "not") %>%
+  count(word1, word2, sort = TRUE)
+
+trigrams %>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  filter(word1 == "not") %>%
+  count(word1, word2, word3, sort = TRUE)
+
+
+AFINN <- get_sentiments("afinn")
+
+(nots <- bigrams %>%
+    separate(bigram, c("word1", "word2"), sep = " ") %>%
+    filter(word1 == "not") %>%
+    inner_join(AFINN, by = c(word2 = "word")) %>%
+    count(word2, score, sort = TRUE) 
+)
+
+nots %>%
+  mutate(contribution = n * score) %>%
+  arrange(desc(abs(contribution))) %>%
+  head(20) %>%
+  ggplot(aes(reorder(word2, contribution), n * score, fill = n * score > 0)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  xlab("Words preceded by 'not'") +
+  ylab("Sentiment score * # of occurrances") +
+  coord_flip()
+
+
+negation_words <- c("not", "no", "never", "without")
+
+(negated <- bigrams %>%
+    separate(bigram, c("word1", "word2"), sep = " ") %>%
+    filter(word1 %in% negation_words) %>%
+    inner_join(AFINN, by = c(word2 = "word")) %>%
+    count(word1, word2, score, sort = TRUE) %>%
+    ungroup()
+)
+
+
+#cors
+#
+(ps_words <- syberia1.orig %>% 
+    unnest_tokens(word, text) %>%
+    filter(!word %in% stop_words$word))
+
+library(widyr)
+
+#to na pozneij
+(word_pairs <- ps_words %>%
+    pairwise_count(word, recommended, sort = TRUE))
