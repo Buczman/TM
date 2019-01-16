@@ -9,9 +9,11 @@ library(cluster)
 library(SentimentAnalysis)
 library(stringr)
 library(OneR)
-library(wordcloud)  
+library(wordcloud)
+library(tidyr)
+library(widyr)
 
-syberia <- fromJSON("Syberia.json", flatten=TRUE)
+syberia <- fromJSON("syberia.json", flatten=TRUE)
 syberia1.orig <- syberia %>% filter(product_id == "46500")
 syberia2.orig <- syberia %>% filter(product_id == "46510")
 syberia$product_id <- ifelse(syberia$product_id == "46500", "Syberia 1", "Syberia 2")
@@ -380,97 +382,154 @@ contToSent(syberia.unnested)
 
 #### Bigram analysis ####
 
-#bigram
-
-bigrams <- syberia1.orig %>%
+syberia.bigrams <- syberia %>%
   unnest_tokens(bigram, text, token = "ngrams", n = 2)
-trigrams <- syberia1.orig %>%
+
+syberia.trigrams <- syberia %>%
   unnest_tokens(trigram, text, token = "ngrams", n = 3)
 
-
-bigrams %>%
-  count(bigram, sort = TRUE)
-
-trigrams %>%
-  count(trigram, sort = TRUE)
-
-bigrams %>%
+syberia.bigrams %<>%
   separate(bigram, c("word1", "word2"), sep = " ") %>%
   filter(!word1 %in% stop_words$word,
-         !word2 %in% stop_words$word) %>%
-  count(word1, word2, sort = TRUE)
+         !word2 %in% stop_words$word)
 
-trigrams %>%
+syberia.trigrams %<>%
   separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
   filter(!word1 %in% stop_words$word,
          !word2 %in% stop_words$word,
-         !word3 %in% stop_words$word) %>%
-  count(word1, word2, word3, sort = TRUE)
+         !word3 %in% stop_words$word)
+
+syberia.bigrams %>%
+  count(product_id, word1, word2, sort = TRUE)
+syberia.trigrams %>%
+  count(product_id, word1, word2, word3, sort = TRUE)
+
+mostCommonBigrams <- function(bigrams, group) {
+  
+  
+  bigrams %>%
+    count_(c(group, "word1", "word2"), sort = TRUE) %>%
+    unite("bigram", c(word1, word2), sep = " ") %>%
+    top_n(10) %>%
+    ungroup() %>%
+    mutate(groupingVar = factor(get(group)) %>% forcats::fct_rev()) %>%
+    ggplot(aes(drlib::reorder_within(bigram, n, groupingVar), n, fill = groupingVar)) +
+    geom_bar(stat = "identity", alpha = .8, show.legend = FALSE) +
+    drlib::scale_x_reordered() +
+    facet_wrap(~ groupingVar, ncol = 2, scales = "free") +
+    coord_flip()
+  
+}
+
+mostCommonBigrams(syberia.bigrams, "product_id")
+mostCommonBigrams(syberia.bigrams, "recommended")
+mostCommonBigrams(syberia.bigrams, "gameplay")
+
+mostCommonTrigrams <- function(trigrams, group) {
+  
+  
+  trigrams %>%
+    count_(c(group, "word1", "word2", "word3"), sort = TRUE) %>%
+    unite("trigram", c(word1, word2, word3), sep = " ") %>%
+    top_n(10) %>%
+    ungroup() %>%
+    mutate(groupingVar = factor(get(group)) %>% forcats::fct_rev()) %>%
+    ggplot(aes(drlib::reorder_within(trigram, n, groupingVar), n, fill = groupingVar)) +
+    geom_bar(stat = "identity", alpha = .8, show.legend = FALSE) +
+    drlib::scale_x_reordered() +
+    facet_wrap(~ groupingVar, ncol = 2, scales = "free") +
+    coord_flip()
+  
+}
+
+mostCommonTrigrams(syberia.trigrams, "product_id")
+mostCommonTrigrams(syberia.trigrams, "recommended")
+mostCommonTrigrams(syberia.trigrams, "gameplay")
 
 
-bigrams %>%
-  separate(bigram, c("word1", "word2"), sep = " ") %>%
-  filter(!word1 %in% stop_words$word,
-         !word2 %in% stop_words$word) %>%
-  count(word1, word2, sort = TRUE) %>%
-  unite("bigram", c(word1, word2), sep = " ") %>%
-  top_n(10) %>%
-  ungroup() %>%
-  ggplot(aes(bigram, n)) +
-  geom_bar(stat = "identity", alpha = .8, show.legend = FALSE) +
-  drlib::scale_x_reordered() +
-  coord_flip()
 
-bigrams %>%
-  separate(bigram, c("word1", "word2"), sep = " ") %>%
-  filter(word1 == "not") %>%
-  count(word1, word2, sort = TRUE)
+TFIDF_bigram <- function(bigrams, group) {
+  
+  bigrams %>%
+    unite("bigram", c(word1, word2), sep = " ") %>% 
+    count_(c(group, "bigram"), sort = TRUE) %>%
+    bind_tf_idf_("bigram", group, "n") %>%
+    arrange(desc(tf_idf)) %>% 
+    group_by_(group) %>%
+    top_n(15, wt = tf_idf) %>%
+    ungroup() %>%
+    mutate(groupingVar = factor(get(group)) %>% forcats::fct_rev()) %>%
+    ggplot(aes(drlib::reorder_within(bigram, tf_idf, groupingVar), tf_idf, fill = groupingVar)) +
+    geom_bar(stat = "identity", alpha = .8, show.legend = FALSE) +
+    labs(title = paste0("Highest tf-idf bi-grams divided by: ", group),
+         x = NULL, y = "tf-idf") +
+    drlib::scale_x_reordered() +
+    facet_wrap(~groupingVar, ncol = 2, scales = "free") +
+    coord_flip()
+  
+}
 
-trigrams %>%
-  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
-  filter(word1 == "not") %>%
-  count(word1, word2, word3, sort = TRUE)
+TFIDF_bigram(syberia.bigrams, "product_id")
+TFIDF_bigram(syberia.bigrams, "recommended")
+TFIDF_bigram(syberia.bigrams, "gameplay")
 
 
-AFINN <- get_sentiments("afinn")
-
-(nots <- bigrams %>%
+preceedingBigram <- function(df, word_) {
+  df %>%
+    unnest_tokens(bigram, text, token = "ngrams", n = 2) %>% 
     separate(bigram, c("word1", "word2"), sep = " ") %>%
-    filter(word1 == "not") %>%
-    inner_join(AFINN, by = c(word2 = "word")) %>%
-    count(word2, score, sort = TRUE) 
-)
+    filter(word1 == word_) %>%
+    inner_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+    count(word2, score, sort = TRUE) %>% 
+    mutate(contribution = n * score) %>%
+    arrange(desc(abs(contribution))) %>%
+    head(20) %>%
+    ggplot(aes(reorder(word2, contribution), n * score, fill = n * score > 0)) +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    xlab(paste0("Words preceded by ", word_)) +
+    ylab("Sentiment score * # of occurrances") +
+    coord_flip()
+}
 
-nots %>%
-  mutate(contribution = n * score) %>%
-  arrange(desc(abs(contribution))) %>%
-  head(20) %>%
-  ggplot(aes(reorder(word2, contribution), n * score, fill = n * score > 0)) +
-  geom_bar(stat = "identity", show.legend = FALSE) +
-  xlab("Words preceded by 'not'") +
-  ylab("Sentiment score * # of occurrances") +
-  coord_flip()
+preceedingBigram(syberia, "very")
+preceedingBigram(syberia, "not")
+preceedingBigram(syberia, "bad")
+preceedingBigram(syberia, "never")
+preceedingBigram(syberia, "good")
 
+preceedingTrigram <- function(df, word_) {
+  df %>%
+    unnest_tokens(trigram, text, token = "ngrams", n = 3) %>%
+    separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+    filter(word1 == word_) %>%
+    inner_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+    inner_join(get_sentiments("afinn"), by = c(word3 = "word")) %>%
+    count(word2, word3, score.x, score.y, sort = TRUE) %>% 
+    mutate(contribution = n * (score.x + score.y)) %>%
+    unite("bigram", c(word2, word3), sep = " ") %>% 
+    arrange(desc(abs(contribution))) %>%
+    head(20) %>%
+    ggplot(aes(reorder(bigram, contribution), n * (score.x + score.y), fill = n * (score.x + score.y) > 0)) +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    xlab(paste0("Words preceded by ", word_)) +
+    ylab("Sentiment score * # of occurrances") +
+    coord_flip()
+}
 
-negation_words <- c("not", "no", "never", "without")
+preceedingTrigram(syberia, "very")
+preceedingTrigram(syberia, "not")
+preceedingTrigram(syberia, "bad")
+preceedingTrigram(syberia, "never")
+preceedingTrigram(syberia, "good")
 
-(negated <- bigrams %>%
-    separate(bigram, c("word1", "word2"), sep = " ") %>%
-    filter(word1 %in% negation_words) %>%
-    inner_join(AFINN, by = c(word2 = "word")) %>%
-    count(word1, word2, score, sort = TRUE) %>%
-    ungroup()
-)
+#### Word correlations ####
 
-
-#cors
-#
-(ps_words <- syberia1.orig %>% 
+syberia.wc <- syberia %>% 
     unnest_tokens(word, text) %>%
-    filter(!word %in% stop_words$word))
+    filter(!word %in% stop_words$word)
 
-library(widyr)
+syberia.wp <- syberia.wc %>%
+    pairwise_count(word, product_id, sort = TRUE)
 
-#to na pozneij
-(word_pairs <- ps_words %>%
-    pairwise_count(word, recommended, sort = TRUE))
+syberia.wp %>% 
+  filter(item1 == "adventure")
