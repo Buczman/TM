@@ -7,11 +7,14 @@ library(topicmodels)
 library(tidytext)
 library(cluster)
 library(SentimentAnalysis)
+library(stringr)
+library(OneR)
+library(wordcloud)  
 
 syberia <- fromJSON("Syberia.json", flatten=TRUE)
 syberia1.orig <- syberia %>% filter(product_id == "46500")
 syberia2.orig <- syberia %>% filter(product_id == "46510")
-
+syberia$product_id <- ifelse(syberia$product_id == "46500", "Syberia 1", "Syberia 2")
 syberia1.orig %>% nrow
 syberia2.orig %>% nrow
 
@@ -72,6 +75,26 @@ findAssocs(syberia1.DTM,
 findAssocs(syberia2.DTM, 
            c("graphic", "sound", "good", "bad", "stori", "audio", "plot", "quest"),
            corlimit = 0.4) 
+
+#### Wordcloud ####
+
+syberia1.DTM.nonsparse <- removeSparseTerms(syberia1.DTM, 0.9)   
+syberia1.freq <- colSums(as.matrix(syberia1.DTM.nonsparse))   
+wordcloud(names(syberia1.freq),
+          syberia1.freq,
+          scale = c(3,1),
+          colors = brewer.pal(3, "Dark2"),
+          rot.per = 0)
+
+syberia2.DTM.nonsparse <- removeSparseTerms(syberia2.DTM, 0.9)   
+syberia2.freq <- colSums(as.matrix(syberia2.DTM.nonsparse))   
+wordcloud(names(syberia2.freq),
+          syberia1.freq,
+          scale = c(3,1),
+          colors = brewer.pal(3, "Dark2"),
+          rot.per = 0)
+
+
 
 #### Models for classification #### 
 
@@ -253,133 +276,109 @@ syberia2.LDA <- GibbsLDA(syberia2.DTM)
 #### Sentiment modelling #### 
 
 
-sentiment <- analyzeSentiment(syberia1.orig$text)
-plotSentiment(sentiment$SentimentHE)
-convertToDirection(sentiment$SentimentQDAP)
-data(DictionaryGI)
+syberia1.sent <- analyzeSentiment(syberia1.orig$text)
+plotSentiment(syberia1.sent$SentimentHE)
+mean(syberia1.sent$SentimentQDAP, na.rm = T)
+table(convertToDirection(syberia1.sent$SentimentQDAP))
+table(syberia1.orig$recommended)
 
-df <- data.frame(sentence=1:351,QDAP=sentiment$SentimentQDAP, GI=sentiment$SentimentGI)
+syberia2.sent <- analyzeSentiment(syberia2.orig$text)
+plotSentiment(syberia2.sent$SentimentHE)
+mean(syberia2.sent$SentimentQDAP, na.rm = T)
+table(convertToDirection(syberia2.sent$SentimentQDAP))
+table(syberia2.orig$recommended)
 
-ggplot(df, aes(x=sentence, y=QDAP)) + geom_line(color="red")+geom_line(aes(x=sentence, y=GI),color="green")
+#do poprawt
 
-
-
-
-#na chart
-
-tidy_books <- syberia1.orig %>%
-  unnest_tokens(word, text)
-
-get_sentiments("nrc")[, 2] %>% unique %>% pull %>%  lapply(function(x) {
-  tidy_books %>%
+get_sentiments("nrc")[, 2] %>% unique %>% pull %>%  
+  lapply(function(x) {
+  syberia1.orig %>%
+    unnest_tokens(word, text) %>%
     inner_join(get_sentiments("nrc") %>% 
                  filter(sentiment == x)) %>%
     count(word, sort = TRUE)
   
 })
 
-library(stringr)
-library(OneR)
-
-
-syberia1.orig$gameplay <- bin(syberia1.orig$hours, nbins = 5, na.omit = F)
-
-syberia1.words <- syberia1.orig %>%
+syberia.unnested <- syberia %>% 
   unnest_tokens(word, text) %>%
   filter(str_detect(word, "[a-z']$"),
          !word %in% stop_words$word)
 
-syberia1.words %>%
-  count(word, sort = TRUE)
+syberia$gameplay <- bin(syberia$hours, nbins = 5, na.omit = F)
 
-words_by_recommend <- syberia1.words %>%
+words_by_part <- syberia.unnested %>%
+  count(product_id, word, sort = TRUE) %>%
+  ungroup()
+
+words_by_recommend <- syberia.unnested %>%
   count(recommended, word, sort = TRUE) %>%
   ungroup()
 
-words_by_gameplay <- syberia1.words %>%
+words_by_gameplay <- syberia.unnested %>%
   count(gameplay, word, sort = TRUE) %>%
   ungroup()
 
-words_by_date <- syberia1.words %>%
-  count(date, word, sort = TRUE) %>%
-  ungroup()
+
+words_by_recommend %>% 
+  filter(!recommended)
+
+tf_idf_plot <- function(words, group) {
+  words %>%
+    bind_tf_idf_("word", group, "n") %>%
+    arrange(desc(tf_idf)) %>% 
+    group_by_(group) %>%
+    top_n(20, tf_idf) %>%
+    ungroup() %>%
+    mutate(word = reorder(word, tf_idf)) %>%
+    ggplot(aes_string("word", "tf_idf", fill = group)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(as.formula(paste0("~ ", group)), scales = "free") +
+    ggtitle(paste0("TF-IDF for grouping variable: ", group)) +
+    ylab("tf-idf") +
+    coord_flip()
+}
+
+tf_idf_plot(words_by_recommend, "recommended")
+tf_idf_plot(words_by_part, "product_id")
+tf_idf_plot(words_by_gameplay, "gameplay")
+
+aveSent <- function(words, group) {
+  words %>%
+    inner_join(get_sentiments("afinn"), by = "word") %>%
+    group_by_(group) %>%
+    summarize(score = sum(score * n) / sum(n)) %>% 
+    mutate(groupingVar = reorder(get(group), score)) %>%
+    ggplot(aes(groupingVar, score, fill = score > 0)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() +
+    ggtitle(paste0("Average sentiment for grouping variable: ", group)) +
+    ylab("Average sentiment score")
+}
+
+aveSent(words_by_recommend, "recommended")
+aveSent(words_by_part, "product_id")
+aveSent(words_by_gameplay, "gameplay")
+
+contToSent <- function(words) {
+  
+  words %>%
+    inner_join(get_sentiments("afinn"), by = "word") %>%
+    group_by(word) %>%
+    summarize(occurences = n(),
+              contribution = sum(score)) %>% 
+    top_n(25, abs(contribution)) %>%
+    mutate(word = reorder(word, contribution)) %>%
+    ggplot(aes(word, contribution, fill = contribution > 0)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip()
+  
+}
+
+contToSent(syberia.unnested)
 
 
-words_by_recommend %>% filter(!recommended)
-
-tf_idf <- words_by_recommend %>%
-  bind_tf_idf(word, recommended, n) %>%
-  arrange(desc(tf_idf))
-
-tf_idf
-
-#to jest najs
-
-tf_idf %>%
-  group_by(recommended) %>%
-  top_n(12, tf_idf) %>%
-  ungroup() %>%
-  mutate(word = reorder(word, tf_idf)) %>%
-  ggplot(aes(word, tf_idf, fill = recommended)) +
-  geom_col(show.legend = FALSE) +
-  facet_wrap(~ recommended, scales = "free") +
-  ylab("tf-idf") +
-  coord_flip()
-
-
-
-recommendp_sentiments <- words_by_recommend %>%
-  inner_join(get_sentiments("afinn"), by = "word") %>%
-  group_by(recommended) %>%
-  summarize(score = sum(score * n) / sum(n))
-
-recommendp_sentiments %>%
-  mutate(recommended = reorder(recommended, score)) %>%
-  ggplot(aes(recommended, score, fill = score > 0)) +
-  geom_col(show.legend = FALSE) +
-  coord_flip() +
-  ylab("Average sentiment score")
-
-recommendp_sentiments <- words_by_gameplay %>%
-  inner_join(get_sentiments("afinn"), by = "word") %>%
-  group_by(gameplay) %>%
-  summarize(score = sum(score * n) / sum(n))
-
-recommendp_sentiments %>%
-  mutate(gameplay = reorder(gameplay, score)) %>%
-  ggplot(aes(gameplay, score, fill = score > 0)) +
-  geom_col(show.legend = FALSE) +
-  coord_flip() +
-  ylab("Average sentiment score")
-
-
-contributions <- syberia1.words %>%
-  inner_join(get_sentiments("afinn"), by = "word") %>%
-  group_by(word) %>%
-  summarize(occurences = n(),
-            contribution = sum(score))
-
-contributions
-contributions %>%
-  top_n(25, abs(contribution)) %>%
-  mutate(word = reorder(word, contribution)) %>%
-  ggplot(aes(word, contribution, fill = contribution > 0)) +
-  geom_col(show.legend = FALSE) +
-  coord_flip()
-
-
-
-## WORDCLOUD
-# Do the word clouds
-library(wordcloud)   
-dtms <- removeSparseTerms(dtm, 0.15)   
-freq <- colSums(as.matrix(dtm))   
-wordcloud(names(freq),
-          freq,
-          scale = c(4,1),
-          colors = brewer.pal(3, "Pastel2"),
-          rot.per = 0)
-
+#### Bigram analysis ####
 
 #bigram
 
