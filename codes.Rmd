@@ -1,0 +1,2043 @@
+---
+title: "Are sequels better than the originals?"
+subtitle: "A project of text mining analysis for Steam games reviews" 
+author: "Mateusz Buczyñski & Oskar Rychlica"
+output: pdf_document
+always_allow_html: yes
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+knitr::opts_chunk$set(cache = T)
+
+library(jsonlite)
+library(dplyr)
+library(tm)
+library(SnowballC)
+library(caret)
+library(topicmodels)
+library(tidytext)
+library(cluster)
+library(SentimentAnalysis)
+library(stringr)
+library(OneR)
+library(wordcloud2)
+library(tidyr)
+library(widyr)
+library(kableExtra)
+library(ggthemes)
+library(igraph)
+theme_set(theme_fivethirtyeight())
+```
+
+## Introduction
+
+```{r loading, include=FALSE, cache = F}
+
+syberia <- fromJSON("syberia.json", flatten=TRUE)
+syberia1.orig <- syberia %>% filter(product_id == "46500")
+syberia2.orig <- syberia %>% filter(product_id == "46510")
+syberia$product_id <- ifelse(syberia$product_id == "46500", "Syberia 1", "Syberia 2")
+syberia$gameplay <- cut(syberia$hours, breaks = 5, include.lowest = T, dig.lab = 4)
+
+#ME
+me <- fromJSON("me.json", flatten=TRUE)
+me1.orig <- me %>% filter(product_id == "17460")
+me2.orig <- me %>% filter(product_id == "24980")
+me$product_id <- ifelse(me$product_id == "17460", "Mass Effect 1", "Mass Effect 2")
+me$gameplay <- cut(me$hours, breaks = 5, include.lowest = T, dig.lab = 4)
+
+#mafia
+mafia <- fromJSON("mafia.json", flatten=TRUE)
+mafia1.orig <- mafia %>% filter(product_id == "40990")
+mafia2.orig <- mafia %>% filter(product_id == "50130")
+mafia$product_id <- ifelse(mafia$product_id == "40990", "Mafia 1", "Mafia 2")
+mafia$gameplay <- cut(mafia$hours, breaks = 5, include.lowest = T, dig.lab = 4)
+
+#bioshock
+bioshock <- fromJSON("bioshock.json", flatten=TRUE)
+bioshock1.orig <- bioshock %>% filter(product_id == "7670")
+bioshock2.orig <- bioshock %>% filter(product_id == "8850")
+bioshock$product_id <- ifelse(bioshock$product_id == "7670", "Bioshock 1", "Bioshock 2")
+bioshock$gameplay <- cut(bioshock$hours, breaks = 5, include.lowest = T, dig.lab = 4)
+
+#magicka
+magicka <- fromJSON("magicka.json", flatten=TRUE)
+magicka1.orig <- magicka %>% filter(product_id == "42910")
+magicka2.orig <- magicka %>% filter(product_id == "238370")
+magicka$product_id <- ifelse(magicka$product_id == "42910", "Magicka 1", "Magicka 2")
+magicka$gameplay <- cut(magicka$hours, breaks = 5, include.lowest = T, dig.lab = 4)
+
+#duke nukem
+dn <- fromJSON("dukenukem.json", flatten=TRUE)
+dn1.orig <- dn %>% filter(product_id == "434050")
+dn2.orig <- dn %>% filter(product_id == "57900")
+dn$product_id <- ifelse(dn$product_id == "434050", "Duke Nukem 1", "Duke Nukem 2")
+dn$gameplay <- cut(dn$hours, breaks = 5, include.lowest = T, dig.lab = 4)
+
+
+```
+
+```{r func, include=FALSE }
+#There area lot of functions in this Rmd, please read carefully what they do as we did not hace enough time to comment them
+createTdmDtm <- function(text) {
+  
+  toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+
+  corp <- Corpus(VectorSource(text))
+  corp <- tm_map(corp, toSpace, "/")
+  corp <- tm_map(corp, toSpace, "@")
+  corp <- tm_map(corp, toSpace, "\\|")
+  corp <- tm_map(corp, toSpace, "[^\x01-\x7F]")
+  corp <- tm_map(corp, toSpace, "¦")
+  corp <- tm_map(corp, stripWhitespace)
+  corp <- tm_map(corp, removePunctuation)
+  corp <- tm_map(corp, removeNumbers)
+  corp <- tm_map(corp, content_transformer(tolower))
+  corp <- tm_map(corp, removeWords, stopwords("english"))
+  corp <- tm_map(corp, stemDocument)
+  
+  dtm <- DocumentTermMatrix(corp)
+  tdm <- TermDocumentMatrix(corp)
+  
+  list(dtm, tdm)
+}
+
+mostCommonWordsPlt <- function(DTM1, DTM2, sparsity = 0.9, gameName1, gameName2){
+  
+  freq1 <- colSums(as.matrix(removeSparseTerms(DTM1, sparsity)))
+  freq2 <- colSums(as.matrix(removeSparseTerms(DTM2, sparsity)))
+  freq <- full_join(
+    data.frame(word = names(freq1), freq1 = freq1), 
+    data.frame(word = names(freq2), freq2 = freq2))
+  
+  freq %>% 
+    subset(., freq1 > 30 | freq2 > 30) %>%
+    head(20) %>% 
+    ggplot(aes(x = reorder(word, -freq1))) + 
+    geom_bar(aes(y = freq1, fill = "Sequel"), stat = "identity", alpha = 0.7) + 
+    geom_bar(aes(y = freq2, fill = "Original"), stat = "identity", alpha = 0.7) + 
+    theme(axis.text.x = element_text(angle=45, hjust=1)) + 
+    labs(x = "Words", y = "Frequencies", title = paste0("Words frequencies for ", gameName1, " and ", gameName2)) +
+    scale_fill_manual(name=NULL, values=c(Original ="lightblue", Sequel ="red")) +
+    theme(legend.key.size = unit(0.25, "cm"), legend.position="bottom", plot.title = element_text(size=8))
+  
+}
+
+hClustTM <- function(TDM, k, gameName) {
+  
+  d <- dist(removeSparseTerms(TDM, 0.85), method = "manhattan")
+  fit <- hclust(d, method = "ward.D2")    
+  plot.new()
+  plot(fit, hang=-1, main = gameName)
+  groups <- cutree(fit, k)  
+  rect.hclust(fit, k, border = "darkblue")
+}
+
+kMeansTM <- function(TDM, k, gamename) {
+  
+  d <- dist(removeSparseTerms(TDM, 0.85), method = "manhattan")
+  
+  kfit <- kmeans(d, k)
+  clusplot(as.matrix(d), main = gamename, kfit$cluster, color=T, shade=T, labels=2, lines = 0)
+  
+}
+
+top_terms_by_topic_LDA <- function(DTM, # columm from a dataframe
+                                   plot = T, 
+                                   number_of_topics = 4,
+                                   gameName = "") # number of topics 
+{    
+  unique_indexes <- unique(DTM$i) # index of each unique value
+  DTM <- DTM[unique_indexes,] 
+  
+  # preform LDA
+  lda <- LDA(DTM, k = number_of_topics, control = list(seed = 1234))
+  topics <- tidy(lda, matrix = "beta")
+  
+  # top ten terms for each topic
+  top_terms <- topics  %>% 
+    group_by(topic) %>% # each topic as a different group
+    top_n(10, beta) %>% # 10 most informative words
+    ungroup() %>% 
+    arrange(topic, -beta) # arrange words 
+  
+  if(plot == T){
+    top_terms %>% 
+      mutate(term = reorder(term, beta)) %>% 
+      ggplot(aes(term, beta, fill = factor(topic))) + # plot beta by theme
+      geom_col(show.legend = FALSE) + # bar plot
+      facet_wrap(~ topic, scales = "free") + 
+      labs(x = NULL, y = "Beta", title = gameName) + 
+      coord_flip()
+  } else{ 
+    # list of sorted terms instead of a plot
+    return(top_terms)
+  }
+}
+
+GibbsLDA <- function(DTM, k=2) {
+
+  burnin <- 4000
+  iter <- 2000
+  thin <- 500
+  seed <-list(2003,5,63,100001,765)
+  nstart <- 5
+  unique_indexes <- unique(DTM$i)
+  
+  ldaOut <- LDA(DTM[unique_indexes, ], k, 
+                method="Gibbs", 
+                control=list(nstart=nstart, seed = seed, best=T, burnin = burnin, iter = iter, thin=thin))
+  ldaOut.topics <- as.matrix(topics(ldaOut))
+  ldaOut.terms <- as.matrix(terms(ldaOut,3))
+  
+  list(ldaOut.topics,
+       ldaOut.terms)
+  
+}
+
+tf_idf_plot <- function(words, group, gameName, topn=10) {
+  words %>%
+    bind_tf_idf_("word", group, "n") %>%
+    arrange(desc(tf_idf)) %>% 
+    group_by_(group) %>%
+    top_n(topn, tf_idf) %>%
+    ungroup() %>%
+    mutate(word = reorder(word, tf_idf)) %>%
+    ggplot(aes_string("word", "tf_idf", fill = group)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(as.formula(paste0("~ ", group)), scales = "free") +
+    ggtitle(paste0("TF-IDF for grouping variable:\n", group, ", for game:\n", gameName)) +
+    ylab("tf-idf") +
+    coord_flip()
+}
+
+aveSent <- function(words, group, gameName) {
+  words %>%
+    inner_join(get_sentiments("afinn"), by = "word") %>%
+    group_by_(group) %>%
+    summarize(score = sum(score * n) / sum(n)) %>% 
+    mutate(groupingVar = reorder(get(group), score)) %>%
+    ggplot(aes(groupingVar, score, fill = score > 0)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() +
+    ggtitle(paste0("Average sentiment for grouping variable:\n", group, ", for game:\n", gameName)) +
+    ylab("Average sentiment score")  +
+    theme(title = element_text(size=5)) 
+}
+contToSent <- function(words, game) {
+  
+  words %>%
+    inner_join(get_sentiments("afinn"), by = "word") %>%
+    group_by(word) %>%
+    summarize(occurences = n(),
+              contribution = sum(score)) %>% 
+    top_n(20, abs(contribution)) %>%
+    mutate(word = reorder(word, contribution)) %>%
+    ggplot(aes(word, contribution, fill = contribution > 0)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() +
+    ggtitle(game)
+  
+}
+
+mostCommonBigrams <- function(bigrams, group, gameName) {
+  
+  
+  bigrams %>%
+    count_(c(group, "word1", "word2"), sort = TRUE) %>%
+    unite("bigram", c(word1, word2), sep = " ") %>%
+    top_n(10) %>%
+    ungroup() %>%
+    mutate(groupingVar = factor(get(group)) %>% forcats::fct_rev()) %>%
+    ggplot(aes(drlib::reorder_within(bigram, n, groupingVar), n, fill = groupingVar)) +
+    geom_bar(stat = "identity", alpha = .8, show.legend = FALSE) +
+    drlib::scale_x_reordered() +
+    facet_wrap(~ groupingVar, ncol = 2, scales = "free") +
+    coord_flip() +
+    ggtitle(paste0("Most common bigrams in division into:\n ", group, "for:\n", gameName))
+  
+}
+
+mostCommonTrigrams <- function(trigrams, group, gameName) {
+  
+  
+  trigrams %>%
+    filter(!is.na(word1)) %>% 
+    count_(c(group, "word1", "word2", "word3"), sort = TRUE) %>%
+    unite("trigram", c(word1, word2, word3), sep = " ") %>%
+    top_n(10) %>%
+    ungroup() %>%
+    mutate(groupingVar = factor(get(group)) %>% forcats::fct_rev()) %>%
+    ggplot(aes(drlib::reorder_within(trigram, n, groupingVar), n, fill = groupingVar)) +
+    geom_bar(stat = "identity", alpha = .8, show.legend = FALSE) +
+    drlib::scale_x_reordered() +
+    facet_wrap(~ groupingVar, ncol = 2, scales = "free") +
+    coord_flip() +
+    ggtitle(paste0("Most common trigrams in division into:\n ", group, "for:\n", gameName))
+  
+}
+
+
+TFIDF_bigram <- function(bigrams, group, gameName) {
+  
+  bigrams %>%
+    unite("bigram", c(word1, word2), sep = " ") %>% 
+    count_(c(group, "bigram"), sort = TRUE) %>%
+    bind_tf_idf_("bigram", group, "n") %>%
+    arrange(desc(tf_idf)) %>% 
+    group_by_(group) %>%
+    top_n(10, wt = tf_idf) %>%
+    ungroup() %>%
+    mutate(groupingVar = factor(get(group)) %>% forcats::fct_rev()) %>%
+    ggplot(aes(drlib::reorder_within(bigram, tf_idf, groupingVar), tf_idf, fill = groupingVar)) +
+    geom_bar(stat = "identity", alpha = .8, show.legend = FALSE) +
+    labs(title = paste0("Highest tf-idf bi-grams divided by: ", group),
+         x = NULL, y = "tf-idf") +
+    drlib::scale_x_reordered() +
+    facet_wrap(~groupingVar, ncol = 2, scales = "free") +
+    coord_flip() +
+    ggtitle(paste0("TF-IDF (bigram) in division into:\n ", group, "for:\n", gameName))
+  
+}
+
+preceedingBigram <- function(df, word_, gameName) {
+  df %>%
+    unnest_tokens(bigram, text, token = "ngrams", n = 2) %>% 
+    separate(bigram, c("word1", "word2"), sep = " ") %>%
+    filter(word1 == word_) %>%
+    inner_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+    count(word2, score, sort = TRUE) %>% 
+    mutate(contribution = n * score) %>%
+    arrange(desc(abs(contribution))) %>%
+    head(20) %>%
+    ggplot(aes(reorder(word2, contribution), n * score, fill = n * score > 0)) +
+    geom_bar(stat = "identity", show.legend = FALSE) +
+    xlab(paste0("Words preceded by ", word_)) +
+    ylab("Sentiment score * # of occurrances") +
+    coord_flip() + 
+    ggtitle(paste0("Words preceeding word:\n", word_, " for:\n", gameName)) +
+    theme(title = element_text(size=5)) 
+}
+```
+
+Game reviews are a way of developers knowing how well they did their job. Either a game gets good, positive reviews or it is completely dragged through the mud. Given a game had very good reviews, developers usually give it another chance by releasing sequel with new story, graphics or audio. But the attitude towards
+sequels is very mixed, though. Sometimes it is even better not to try to fix a masterpiece, but several times in the history of gaming developers managed to provide us, gamers, with another episode of excellent quality entertainment.
+In this short report we would like to address how does the sentiment of reviews change for original and sequel versions of the same games. Games that we will be considering here are: Syberia, Mass Effect, Mafia, Duke Nukem, Bioshock and Magicka. All of these games were pretty well adopted and had their reviews positive. On the other hand sequels of these games might have not always been admired. The data that we use here considers all the reviews for these games scraped from the Steam platform. Each of the datasets has the text of the review, username of the reviewer, logical column that tells us whether he/she recommends the game, the number of games that the reviewer has in their library and how many hours has he/she played the game reviewed.
+
+## Tokenization and visualizations
+
+The first step of our project was to parse the review’s text into R, tokenize the words, remove unnecessary words, punctuations, special characters (which are obviously redundant in data that comes from the Internet) and in the end stem the words to their root forms. Next, we have created both TermDocumentMatrix and DocumentTermMatrix as we will use them both in the further analyses. All of this work has been wrapped in one single function that does all of this at once.
+
+Each of the games has the following number of reviews:
+
+```{r num}
+
+cbind(
+  rbind("Original", 
+        "Sequel"),
+  rbind(nrow(syberia1.orig),
+        nrow(syberia2.orig)),
+  rbind(nrow(me1.orig),
+        nrow(me2.orig)),
+  rbind(nrow(mafia1.orig),
+        nrow(mafia2.orig)),
+  rbind(nrow(bioshock1.orig),
+        nrow(bioshock2.orig)),
+  rbind(nrow(magicka1.orig),
+        nrow(magicka2.orig)),
+  rbind(nrow(dn1.orig),
+        nrow(dn2.orig))
+) %>% 
+  kable("latex") %>% 
+  add_header_above(c(" " = 1, "Syberia" = 1, "Mass Effect" = 1,"Mafia" = 1, "Bioshock" = 1, "Magicka" = 1, "Duke Nukem" = 1))
+
+```
+
+
+```{r TDMDTM, include=F}
+
+syberia1.DTM <- createTdmDtm(syberia1.orig$text)[[1]]
+syberia1.TDM <- createTdmDtm(syberia1.orig$text)[[2]]
+
+syberia2.DTM <- createTdmDtm(syberia2.orig$text)[[1]]
+syberia2.TDM <- createTdmDtm(syberia2.orig$text)[[2]]
+
+me1.DTM <- createTdmDtm(me1.orig$text)[[1]]
+me1.TDM <- createTdmDtm(me1.orig$text)[[2]]
+
+me2.DTM <- createTdmDtm(me2.orig$text)[[1]]
+me2.TDM <- createTdmDtm(me2.orig$text)[[2]]
+
+mafia1.DTM <- createTdmDtm(mafia1.orig$text)[[1]]
+mafia1.TDM <- createTdmDtm(mafia1.orig$text)[[2]]
+
+mafia2.DTM <- createTdmDtm(mafia2.orig$text)[[1]]
+mafia2.TDM <- createTdmDtm(mafia2.orig$text)[[2]]
+
+bioshock1.DTM <- createTdmDtm(bioshock1.orig$text)[[1]]
+bioshock1.TDM <- createTdmDtm(bioshock1.orig$text)[[2]]
+
+bioshock2.DTM <- createTdmDtm(bioshock2.orig$text)[[1]]
+bioshock2.TDM <- createTdmDtm(bioshock2.orig$text)[[2]]
+
+magicka1.DTM <- createTdmDtm(magicka1.orig$text)[[1]]
+magicka1.TDM <- createTdmDtm(magicka1.orig$text)[[2]]
+
+magicka2.DTM <- createTdmDtm(magicka2.orig$text)[[1]]
+magicka2.TDM <- createTdmDtm(magicka2.orig$text)[[2]]
+
+dn1.DTM <- createTdmDtm(dn1.orig$text)[[1]]
+dn1.TDM <- createTdmDtm(dn1.orig$text)[[2]]
+
+dn2.DTM <- createTdmDtm(dn2.orig$text)[[1]]
+dn2.TDM <- createTdmDtm(dn2.orig$text)[[2]]
+
+
+```
+
+Let us have a quick peek at the most common root forms in each of the games. Each of the games has the word *game* itself as one of the most popular. Name of the game often shows up in most reviews. *Story* and *play* are also common. Syberia is an adventure game, hence some adventure genre words are showing up: *puzzl*, *character*, *adventur.* Mass Effect is more of a RPG/shooter game - *story*, *one* for a single player game genre. Mafia - a shooter game with a great *story*. Bioshock is a game set in an utopian world and is more of a *story*/*shooter* game and is pretty *good*. Magicka is a fun game, where you are a wizard and shoot different *spells* to *kill* your enemies. And you can play it with *friends*! Duke Nukem is pretty old game with a *new* edition, which is a shooter set in postapocaliptic world.
+
+```{r mostcommon}
+
+  df <- cbind(
+    head(names(sort(rowSums(as.matrix(syberia1.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(syberia1.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(syberia2.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(syberia2.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(me1.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(me1.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(me2.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(me2.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(mafia1.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(mafia1.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(mafia2.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(mafia2.TDM)), T), 10)
+    )
+  rownames(df) <- NULL
+  kable(df, "latex")  %>% #, caption = "Number of most common terms occurences"
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c("Syberia 1" = 2, "Syberia 2" = 2, "Mass Effect 1" = 2, "Mass Effect 2" = 2, "Mafia 1" = 2, "Mafia 2" = 2))
+  
+  
+    df <- cbind(
+    head(names(sort(rowSums(as.matrix(bioshock1.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(bioshock1.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(bioshock2.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(bioshock2.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(magicka1.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(magicka1.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(magicka2.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(magicka2.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(dn1.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(dn1.TDM)), T), 10),
+    head(names(sort(rowSums(as.matrix(dn2.TDM)), T)), 10),
+    head(sort(rowSums(as.matrix(dn2.TDM)), T), 10)
+    )
+  rownames(df) <- NULL
+  kable(df, "latex")  %>% #, caption = "Number of most common terms occurences"
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c("Bioshock 1" = 2, "Bioshock 2" = 2, "Magicka 1" = 2, "Magicka 2" = 2, "Duke Nukem 1" = 2, "Duke Nukem 2" = 2))
+
+```
+
+Another way to present such information is a barplot. Below we present 6 plots for each of the games. There are many similiar words shared by originals and sequels, e.g. *game*.
+
+```{r commonplots, fig.height=2, fig.width=3, message=FALSE, warning=FALSE}
+mostCommonWordsPlt(syberia1.DTM, syberia2.DTM, 0.85, gameName1 = "Syberia 1", gameName2 = "Syberia 2")
+mostCommonWordsPlt(me1.DTM, me2.DTM, 0.85, gameName1 = "Mass Effect 1", gameName2 = "Mass Effect 2")
+mostCommonWordsPlt(mafia1.DTM, mafia2.DTM, 0.85, gameName1 = "Mafia 1", gameName2 = "Mafia 2")
+mostCommonWordsPlt(bioshock1.DTM, bioshock2.DTM, 0.85, gameName1 = "Bioshock 1", gameName2 = "Bioshock 2")
+mostCommonWordsPlt(magicka1.DTM, magicka2.DTM, 0.85, gameName1 = "Magicka 1", gameName2 = "Magicka 2")
+mostCommonWordsPlt(dn1.DTM, dn2.DTM, 0.85, gameName1 = "Duke Nukem 1", gameName2 = "Duke Nukem 2")
+
+```
+
+Another way to represent the most common words is to prepare a wordcloud. We present them below, they should resemble the aforementioned information, but the higher sparsity matrices were used in these examples.
+
+```{r wordclouds, fig.align = "center", fig.height=1.5, fig.width=3, message=FALSE, warning=FALSE} 
+#i had to comment the code to attach into pdfs
+
+# syberia1.DTM.nonsparse <- removeSparseTerms(syberia1.DTM, 0.9)   
+# syberia1.freq <- colSums(as.matrix(syberia1.DTM.nonsparse))   
+# wordcloud2(data.frame(names(syberia1.freq),
+#           syberia1.freq),
+#           color = "random-dark")
+# 
+# syberia2.DTM.nonsparse <- removeSparseTerms(syberia2.DTM, 0.9)   
+# syberia2.freq <- colSums(as.matrix(syberia2.DTM.nonsparse))   
+# wordcloud2(data.frame(names(syberia2.freq),
+#           syberia2.freq),
+#           color = "random-dark")
+# 
+# me1.DTM.nonsparse <- removeSparseTerms(me1.DTM, 0.9)   
+# me1.freq <- colSums(as.matrix(me1.DTM.nonsparse))   
+# wordcloud2(data.frame(names(me1.freq),
+#            me1.freq),
+#            color = "random-dark")
+# 
+# me2.DTM.nonsparse <- removeSparseTerms(me2.DTM, 0.9)   
+# me2.freq <- colSums(as.matrix(me2.DTM.nonsparse))   
+# wordcloud2(data.frame(names(me2.freq),
+#            me2.freq),
+#            color = "random-dark")
+# 
+# mafia1.DTM.nonsparse <- removeSparseTerms(mafia1.DTM, 0.9)   
+# mafia1.freq <- colSums(as.matrix(mafia1.DTM.nonsparse))   
+# wordcloud2(data.frame(names(mafia1.freq),
+#            mafia1.freq),
+#            color = "random-dark")
+# 
+# 
+# mafia2.DTM.nonsparse <- removeSparseTerms(mafia2.DTM, 0.9)   
+# mafia2.freq <- colSums(as.matrix(mafia2.DTM.nonsparse))   
+# wordcloud2(data.frame(names(mafia2.freq),
+#            mafia2.freq),
+#            color = "random-dark")
+# 
+# bioshock1.DTM.nonsparse <- removeSparseTerms(bioshock1.DTM, 0.9)   
+# bioshock1.freq <- colSums(as.matrix(bioshock1.DTM.nonsparse))   
+# wordcloud2(data.frame(names(bioshock1.freq),
+#            bioshock1.freq),
+#            color = "random-dark")
+# 
+# 
+# bioshock2.DTM.nonsparse <- removeSparseTerms(bioshock2.DTM, 0.9)   
+# bioshock2.freq <- colSums(as.matrix(bioshock2.DTM.nonsparse))   
+# wordcloud2(data.frame(names(bioshock2.freq),
+#            bioshock2.freq),
+#            color = "random-dark")
+# 
+# magicka1.DTM.nonsparse <- removeSparseTerms(magicka1.DTM, 0.9)   
+# magicka1.freq <- colSums(as.matrix(magicka1.DTM.nonsparse))   
+# wordcloud2(data.frame(names(magicka1.freq),
+#            magicka1.freq),
+#            color = "random-dark")
+# 
+# 
+# magicka2.DTM.nonsparse <- removeSparseTerms(magicka2.DTM, 0.9)   
+# magicka2.freq <- colSums(as.matrix(magicka2.DTM.nonsparse))   
+# wordcloud2(data.frame(names(magicka2.freq),
+#            magicka2.freq),
+#            color = "random-dark")
+# 
+# dn1.DTM.nonsparse <- removeSparseTerms(dn1.DTM, 0.9)   
+# dn1.freq <- colSums(as.matrix(dn1.DTM.nonsparse))   
+# wordcloud2(data.frame(names(dn1.freq),
+#            dn1.freq),
+#            color = "random-dark")
+# 
+# 
+# dn2.DTM.nonsparse <- removeSparseTerms(dn2.DTM, 0.9)   
+# dn2.freq <- colSums(as.matrix(dn2.DTM.nonsparse))   
+# wordcloud2(data.frame(names(dn2.freq),
+#            dn2.freq),
+#            color = "random-dark")
+
+```
+
+
+\includegraphics[width=2.5in,height=2.5in]{syberia1.png}
+\includegraphics[width=2.5in,height=2.5in]{syberia2.png} $\\$
+\includegraphics[width=2.5in,height=2.5in]{me1.png}
+\includegraphics[width=2.5in,height=2.5in]{me2.png} $\\$
+\includegraphics[width=2.5in,height=2.5in]{mafia1.png}
+\includegraphics[width=2.5in,height=2.5in]{mafia2.png} $\\$
+\includegraphics[width=2.5in,height=2.5in]{bioshock1.png}
+\includegraphics[width=2.5in,height=2.5in]{bioshock2.png} $\\$
+\includegraphics[width=2.5in,height=2.5in]{magicka1.png}
+\includegraphics[width=2.5in,height=2.5in]{magicka2.png} $\\$
+\includegraphics[width=2.5in,height=2.5in]{dn1.png}
+\includegraphics[width=2.5in,height=2.5in]{dn2.png} $\\$
+
+
+## Clustering
+
+We have clustered both the originals and sequels to see how does the words create clusters together. We have started off with hierarchical clustering. It seems that there always is one big cluster with most of the words and the rest of the clusters are the outliers with only one word, e.g. *game* or a game name. In case of Syberia, in terms of both the original and sequel a big cluster consists of adventure games words. In case of Mass Effect this cluster contains, RPG-like words: *character*, Bioshock has *great* *story*, and Duke Nukem is *fun* to *play*. Mafia has one interesting cluster - in case of original words {*best*, *one*, *ever*} and the sequel {*play*, *one*, *like*}, which might mean that players compared the game to the previous one. Magicka has smaller clusters, but we clearly see that we can *play* with *firends* and the *spells* are *fun*. 
+
+```{r hclustering, fig.height=4, fig.width=3, message=FALSE, warning=FALSE} 
+
+hClustTM(syberia1.TDM, 3, "Syberia 1")
+hClustTM(syberia2.TDM, 3, "Syberia 2")
+
+hClustTM(me1.TDM, 3, "Mass Effect 1")
+hClustTM(me2.TDM, 3, "Mass Effect 2")
+
+hClustTM(mafia1.TDM, 3, "Mafia 1")
+hClustTM(mafia2.TDM, 3, "Mafia 2")
+
+hClustTM(bioshock1.TDM, 3, "Bioshock 1")
+hClustTM(bioshock2.TDM, 3, "Bioshock 2")
+
+hClustTM(magicka1.TDM, 3, "Magicka 1")
+hClustTM(magicka2.TDM, 3, "Magicka 2")
+
+hClustTM(dn1.TDM, 3, "Duke Nukem 1")
+hClustTM(dn2.TDM, 3, "Duke Nukem 2")
+
+```
+
+Later on we have used a k-means algorithm to compare the results of clustering. Yet again there are outlying clusters with only one word. The clusters are nearly the same, apart from a new cluster for Duke Nukem 1 (which is in fact a remastered version): {*new*, *duke*, *game*}.
+
+```{r kclustering, fig.height=4, fig.width=3, message=FALSE, warning=FALSE} 
+
+kMeansTM(syberia1.TDM, 3, "Syberia 1")
+kMeansTM(syberia2.TDM, 3, "Syberia 2")
+
+kMeansTM(me1.TDM, 3, "Mass Effect 1")
+kMeansTM(me2.TDM, 3, "Mass Effect 2")
+
+kMeansTM(mafia1.TDM, 3, "Mafia 1")
+kMeansTM(mafia2.TDM, 3, "Mafia 2")
+
+kMeansTM(bioshock1.TDM, 3, "Bioshock 1")
+kMeansTM(bioshock2.TDM, 3, "Bioshock 2")
+
+kMeansTM(magicka1.TDM, 3, "Magicka 1")
+kMeansTM(magicka2.TDM, 3, "Magicka 2")
+
+kMeansTM(dn1.TDM, 3, "Duke Nukem 1")
+kMeansTM(dn2.TDM, 3, "Duke Nukem 2")
+
+```
+
+## Topic modelling
+
+We have attempted to discover the most frequent topics among the reviews using LDA. For each of the games we tried to find two most common topics. Each of the discovered topics has word *game* in it. For Syberia games the topics are nearly the same and talk about the story and puzzles in the game. There is also a main character mentioned. For Mass Effect the situation is very similiar. In Mafia topics we can find car driving, which is one of the game features, but yet again the topics are very similiar to each other. Something more interesting starts happening in Bioshock topics - we have the supporting topic including words like *rupture*, or *plasmid*, which are in-game abilities. In addition Magicka has very interesting topics - one with words like *fun*, *kill* and the other one with *fun* and *friends* - so one of them is towards the gameplay and the other one towards the multiplayer. 
+
+```{r topic, fig.height=2.5, fig.width=3, message=FALSE, warning=FALSE} 
+
+top_terms_by_topic_LDA(syberia1.DTM, number_of_topics = 2, T, "Syberia 1")
+top_terms_by_topic_LDA(syberia2.DTM, number_of_topics = 2, T, "Syberia 2")
+
+top_terms_by_topic_LDA(me1.DTM, number_of_topics = 2, T, "Mass Effect 1")
+top_terms_by_topic_LDA(me2.DTM, number_of_topics = 2, T, "Mass Effect 2")
+
+top_terms_by_topic_LDA(mafia1.DTM, number_of_topics = 2, T, "Mafia 1")
+top_terms_by_topic_LDA(mafia2.DTM, number_of_topics = 2, T, "Mafia 2")
+
+top_terms_by_topic_LDA(bioshock1.DTM, number_of_topics = 2, T, "Bioshock 1")
+top_terms_by_topic_LDA(bioshock2.DTM, number_of_topics = 2, T, "Bioshock 2")
+
+top_terms_by_topic_LDA(magicka1.DTM, number_of_topics = 2, T, "Magicka 1")
+top_terms_by_topic_LDA(magicka2.DTM, number_of_topics = 2, T, "Magicka 2")
+
+top_terms_by_topic_LDA(dn1.DTM, number_of_topics = 2, T, "Duke Nukem 1")
+top_terms_by_topic_LDA(dn2.DTM, number_of_topics = 2, T, "Duke Nukem 2")
+
+```
+
+We have also attempted another approach to topic modellign by LDA with Gibbs sampling. The previous findings have been confirmed. In addition, in Bioshock one of the themes consists of words {*big*, *little*, *daddi*}, which is a partial name of a miniboss in the game. 
+
+```{r gtopic, echo=FALSE, message=FALSE, warning=FALSE}
+
+syberia1.LDA <- GibbsLDA(syberia1.DTM)
+syberia2.LDA <- GibbsLDA(syberia2.DTM)
+
+me1.LDA <- GibbsLDA(me1.DTM)
+me2.LDA <- GibbsLDA(me2.DTM)
+
+mafia1.LDA <- GibbsLDA(mafia1.DTM)
+mafia2.LDA <- GibbsLDA(mafia2.DTM)
+
+bioshock1.LDA <- GibbsLDA(bioshock1.DTM)
+bioshock2.LDA <- GibbsLDA(bioshock2.DTM)
+
+magicka1.LDA <- GibbsLDA(magicka1.DTM)
+magicka2.LDA <- GibbsLDA(magicka2.DTM)
+
+dn1.LDA <- GibbsLDA(dn1.DTM)
+dn2.LDA <- GibbsLDA(dn2.DTM)
+```
+
+```{r}
+cbind(syberia1.LDA[[2]],
+      syberia2.LDA[[2]],
+      me1.LDA[[2]],
+      me2.LDA[[2]],
+      mafia1.LDA[[2]],
+      mafia2.LDA[[2]]) %>% 
+  kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c("Syberia 1" = 2, "Syberia 2" = 2, "Mass Effect 1" = 2, "Mass Effect 2" = 2, "Mafia 1" = 2, "Mafia 2" = 2)) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+  
+cbind(bioshock1.LDA[[2]],
+      bioshock2.LDA[[2]],
+      magicka1.LDA[[2]],
+      magicka2.LDA[[2]],
+      dn1.LDA[[2]],
+      dn2.LDA[[2]]) %>% 
+  kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c("Bioshock 1" = 2, "Bioshock 2" = 2, "Magicka 1" = 2, "Magicka 2" = 2, "Duke Nukem 1" = 2, "Duke Nukem 2" = 2)) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+
+
+```
+
+## Sentiment modelling
+
+The main goal of the analysis is to find whether the average sentiment of the reviews is higher for sequels or not. In addition to that, we have also calculated sentiment in many ways, e.g. in division of one's hours played of a particular game. For Syberia the sentiment of the original game is slightly higher. Both the games have a positive reception. Moreover the percentages of negative/neutral/positive sentiments are very similiar. In addition the percentage of people who recommended the game (TRUE) is nearly perfectly equal to the percentage proportion of positive sentiment. 
+Mass Effect, on the contrary, has a better sentiment for the sequel game. In addition the gap between the games is bigger than in Syberia's case. In this case, there were over 82\% of positive reviews, which is also a percentage of people who recommended the game. It is also worth to note that the percentage of people who did not recommend the game is now equal to the sum of neutral and negative reviews, which is yet again different from the Syberia's case.
+Mafia games are similiar to Mass Effect ones - sequel is better, on overall the sentiment values are very close for Mafia 2 and Mass Effect 2. The percentage of positive sentiment is a little bit lowert than the percentage of recommending reviews for the original, but 92\% score of recommendation matches positive and neutral reviews summed up.
+In case of Bioshock franchise the sequel got lower sentiment score and is comparable with the Syberia games. The number of positive reviews is also lower. Moreover only for the original game the positive and neutral reviews match the recommendation score.
+With Magicka games, we can observe a larger gap between the games. Magicka 1 was very well received and got pretty high sentiment score, whereas Magicka 2 got much lower sentiment. Moreover we can observe much lower scores of positive sentiment in both games, with a lower score given to original game, yet it needs to be added that a big portion of reviews got classified as neutral sentiment. In case of Magicka 1, if we sum up the neutral and positive reviews the number matches more or less the number of positive reviews, but in case of the sequel the recommendation score is much lower and is equal to ~70\%, which matches only positive sentiment reviews
+However the largest gap between the games belongs to Duke Nukem games. The sequel is pretty much *bad* and was not that well received. The average sentiment score of Duke Nukem Forever (2) is half of what the original game has been awarded with. The recommendation percentage is circa 60\% and it simply matches the proportion of the positive reviews. On the other hand the score for original game (remastered one) is higher by ~20\% and also matches the positive reviews number. It can be also observed that the sentiment plot shows much more negative reviews for the sequel than for the original game. 
+
+
+```{r sentiment1, fig.height=4, fig.width=3, message=FALSE, warning=FALSE} 
+syberia1.sent <- analyzeSentiment(syberia1.orig$text)
+plotSentiment(syberia1.sent$SentimentHE, xlab = "Syberia 1")
+syberia2.sent <- analyzeSentiment(syberia2.orig$text)
+plotSentiment(syberia2.sent$SentimentHE, xlab = "Syberia 2")
+
+cbind(mean(syberia1.sent$SentimentQDAP, na.rm = T), 
+      mean(syberia2.sent$SentimentQDAP, na.rm = T)) %>% 
+    kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c("Syberia 1" = 1, "Syberia 2" = 1))
+
+cbind(
+ prop.table(table(convertToDirection(syberia1.sent$SentimentQDAP))),
+  prop.table(table(convertToDirection(syberia2.sent$SentimentQDAP)))) %>% 
+  kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c(" " = 1, "Syberia 1" = 1, "Syberia 2" = 1))
+
+
+cbind(
+  prop.table(table(syberia1.orig$recommended)),
+  prop.table(table(syberia2.orig$recommended))) %>% 
+   kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c(" " = 1, "Syberia 1" = 1, "Syberia 2" = 1))
+
+
+me1.sent <- analyzeSentiment(me1.orig$text)
+plotSentiment(me1.sent$SentimentHE, xlab = "Mass Effect 1")
+me2.sent <- analyzeSentiment(me2.orig$text)
+plotSentiment(me2.sent$SentimentHE, xlab = "Mass Effect 2")
+
+cbind(mean(me1.sent$SentimentQDAP, na.rm = T), 
+      mean(me2.sent$SentimentQDAP, na.rm = T)) %>% 
+    kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c("Mass Effect 1" = 1, "Mass Effect 2" = 1))
+
+cbind(
+ prop.table(table(convertToDirection(me1.sent$SentimentQDAP))),
+  prop.table(table(convertToDirection(me2.sent$SentimentQDAP)))) %>% 
+  kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c(" " = 1, "Mass Effect 1" = 1, "Mass Effect 2" = 1))
+
+
+cbind(
+  prop.table(table(me1.orig$recommended)),
+  prop.table(table(me2.orig$recommended))) %>% 
+   kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c(" " = 1, "Mass Effect 1" = 1, "Mass Effect 2" = 1))
+
+
+
+mafia1.sent <- analyzeSentiment(mafia1.orig$text)
+plotSentiment(mafia1.sent$SentimentHE, xlab = "Mafia 1")
+mafia2.sent <- analyzeSentiment(iconv(mafia2.orig$text, "latin1", "ASCII", sub="")) #these have been identified as a wrongly formatted reviews
+plotSentiment(mafia2.sent$SentimentHE, xlab = "Mafia 2")
+
+cbind(mean(mafia1.sent$SentimentQDAP, na.rm = T),
+      mean(mafia2.sent$SentimentQDAP, na.rm = T)) %>%
+    kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>%
+  add_header_above(c("Mafia 1" = 1, "Mafia 2" = 1))
+
+cbind(
+ prop.table(table(convertToDirection(mafia1.sent$SentimentQDAP))),
+  prop.table(table(convertToDirection(mafia2.sent$SentimentQDAP)))) %>%
+  kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>%
+  add_header_above(c(" " = 1, "Mafia 1" = 1, "Mafia 2" = 1))
+
+
+cbind(
+  prop.table(table(mafia1.orig$recommended)),
+  prop.table(table(mafia2.orig$recommended))) %>%
+  kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>%
+  add_header_above(c(" " = 1, "Mafia 1" = 1, "Mafia 2" = 1))
+
+
+bioshock1.sent <- analyzeSentiment(iconv(bioshock1.orig$text, "latin1", "ASCII", sub=""))
+plotSentiment(bioshock1.sent$SentimentHE, xlab = "Bioshock 1")
+bioshock2.sent <- analyzeSentiment(iconv(bioshock2.orig$text, "latin1", "ASCII", sub=""))
+plotSentiment(bioshock2.sent$SentimentHE, xlab = "Bioshock 2")
+
+cbind(mean(bioshock1.sent$SentimentQDAP, na.rm = T), 
+      mean(bioshock2.sent$SentimentQDAP, na.rm = T)) %>% 
+    kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c("Bioshock 1" = 1, "Bioshock 2" = 1))
+
+cbind(
+ prop.table(table(convertToDirection(bioshock1.sent$SentimentQDAP))),
+  prop.table(table(convertToDirection(bioshock2.sent$SentimentQDAP)))) %>% 
+  kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c(" " = 1, "Bioshock 1" = 1, "Bioshock 2" = 1))
+
+
+cbind(
+  prop.table(table(bioshock1.orig$recommended)),
+  prop.table(table(bioshock2.orig$recommended))) %>% 
+   kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>% 
+  add_header_above(c(" " = 1, "Bioshock 1" = 1, "Bioshock 2" = 1))
+
+
+
+magicka1.sent <- analyzeSentiment(iconv(magicka1.orig$text, "latin1", "ASCII", sub=""))
+plotSentiment(magicka1.sent$SentimentHE, xlab = "Magicka 1")
+magicka2.sent <- analyzeSentiment(iconv(magicka2.orig$text, "latin1", "ASCII", sub=""))
+plotSentiment(magicka2.sent$SentimentHE, xlab = "Magicka 2")
+
+cbind(mean(magicka1.sent$SentimentQDAP, na.rm = T),
+      mean(magicka2.sent$SentimentQDAP, na.rm = T)) %>%
+    kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>%
+  add_header_above(c("Magicka 1" = 1, "Magicka 2" = 1))
+
+cbind(
+ prop.table(table(convertToDirection(magicka1.sent$SentimentQDAP))),
+  prop.table(table(convertToDirection(magicka2.sent$SentimentQDAP)))) %>%
+  kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>%
+  add_header_above(c(" " = 1, "Magicka 1" = 1, "Magicka 2" = 1))
+
+
+cbind(
+  prop.table(table(magicka1.orig$recommended)),
+  prop.table(table(magicka2.orig$recommended))) %>%
+   kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>%
+  add_header_above(c(" " = 1, "Magicka 1" = 1, "Magicka 2" = 1))
+
+
+
+dn1.sent <- analyzeSentiment(dn1.orig$text)
+plotSentiment(dn1.sent$SentimentHE, xlab = "Duke Nukem 1")
+dn2.sent <- analyzeSentiment(iconv(dn2.orig$text, "latin1", "ASCII", sub=""))
+plotSentiment(dn2.sent$SentimentHE, xlab = "Duke Nukem 2")
+
+cbind(mean(dn1.sent$SentimentQDAP, na.rm = T),
+      mean(dn2.sent$SentimentQDAP, na.rm = T)) %>%
+    kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>%
+  add_header_above(c("Duke Nukem 1" = 1, "Duke Nukem 2" = 1))
+
+cbind(
+ prop.table(table(convertToDirection(dn1.sent$SentimentQDAP))),
+  prop.table(table(convertToDirection(dn2.sent$SentimentQDAP)))) %>%
+  kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>%
+  add_header_above(c(" " = 1, "Duke Nukem 1" = 1, "Duke Nukem 2" = 1))
+
+
+cbind(
+  prop.table(table(dn1.orig$recommended)),
+  prop.table(table(dn2.orig$recommended))) %>%
+   kable("latex")  %>%
+  kable_styling(latex_options = "striped") %>%
+  add_header_above(c(" " = 1, "Duke Nukem 1" = 1, "Duke Nukem 2" = 1))
+
+```
+
+\newpage
+
+Later on we have calculated tf_idf values for each word and presented the values in division into: game part (original and sequel) and whether someone recommended the game. It might be more interesting to see, which words had the most impact on the decision of recommendation for the games. For Syberia franchise people didn't like its resemblance to Indiana Jones games. Someone even got a *refund*. For the recommendation, people use words like *wonderful* *stunning* and *touching*. Syberia 1 had some problems with *glitches*, which were *improved* in the sequel.TF_IDF for Mass Effect's recommendation is quite intereseting. First of all, people are not scared to use swear words, while describing their anger with the game. They also didn't like the *repetiteveness* of Mass Effect 1. On the other hand *experiences* and *improvement* wage a big role in the reviews. Mafia games might be *overrated*, but some people do think that it is *underrated*. In Bioshock, people liked *intensity* of gameplay and *details* of the game, but some of them call the game *badshock*. Magicka 1 was compared to *Monty Python*, and people liked its *imaginativeness*. Some people tend to disagree with bad ratings of Duke Nukem 2, calling other reviewers *haters*.
+
+```{r, fig.height=3, fig.width=6, message=FALSE, warning=FALSE} 
+
+syberia.unnested <- syberia %>% 
+  unnest_tokens(word, text) %>%
+  filter(str_detect(word, "[a-z']$"),
+         !word %in% stop_words$word)
+
+syberia.words_by_part <- syberia.unnested %>%
+  count(product_id, word, sort = TRUE) %>%
+  ungroup()
+
+syberia.words_by_recommend <- syberia.unnested %>%
+  count(recommended, word, sort = TRUE) %>%
+  ungroup()
+
+syberia.words_by_gameplay <- syberia.unnested %>%
+  count(gameplay, word, sort = TRUE) %>%
+  ungroup()
+
+
+tf_idf_plot(syberia.words_by_recommend, "recommended", "Syberia")
+tf_idf_plot(syberia.words_by_part, "product_id", "Syberia")
+# tf_idf_plot(syberia.words_by_gameplay, "gameplay", "Syberia")
+
+
+me.unnested <- me %>% 
+  unnest_tokens(word, text) %>%
+  filter(str_detect(word, "[a-z']$"),
+         !word %in% stop_words$word)
+
+me.words_by_part <- me.unnested %>%
+  count(product_id, word, sort = TRUE) %>%
+  ungroup()
+
+me.words_by_recommend <- me.unnested %>%
+  count(recommended, word, sort = TRUE) %>%
+  ungroup()
+
+me.words_by_gameplay <- me.unnested %>%
+  count(gameplay, word, sort = TRUE) %>%
+  ungroup()
+
+
+tf_idf_plot(me.words_by_recommend, "recommended", "Mass Effect")
+tf_idf_plot(me.words_by_part, "product_id", "Mass Effect")
+# tf_idf_plot(me.words_by_gameplay,"gameplay", "Mass Effect", 5)
+
+
+mafia.unnested <- mafia %>% 
+  unnest_tokens(word, text) %>%
+  filter(str_detect(word, "[a-z']$"),
+         !word %in% stop_words$word)
+
+mafia.words_by_part <- mafia.unnested %>%
+  count(product_id, word, sort = TRUE) %>%
+  ungroup()
+
+mafia.words_by_recommend <- mafia.unnested %>%
+  count(recommended, word, sort = TRUE) %>%
+  ungroup()
+
+mafia.words_by_gameplay <- mafia.unnested %>%
+  count(gameplay, word, sort = TRUE) %>%
+  ungroup()
+
+
+tf_idf_plot(mafia.words_by_recommend, "recommended", "Mafia")
+# tf_idf_plot(mafia.words_by_part, "product_id", "Mafia")
+# tf_idf_plot(mafia.words_by_gameplay, "gameplay", "Mafia", 5)
+
+bioshock.unnested <- bioshock %>% 
+  unnest_tokens(word, text) %>%
+  filter(str_detect(word, "[a-z']$"),
+         !word %in% stop_words$word)
+
+bioshock.words_by_part <- bioshock.unnested %>%
+  count(product_id, word, sort = TRUE) %>%
+  ungroup()
+
+bioshock.words_by_recommend <- bioshock.unnested %>%
+  count(recommended, word, sort = TRUE) %>%
+  ungroup()
+
+bioshock.words_by_gameplay <- bioshock.unnested %>%
+  count(gameplay, word, sort = TRUE) %>%
+  ungroup()
+
+
+tf_idf_plot(bioshock.words_by_recommend, "recommended", "Bioshock")
+tf_idf_plot(bioshock.words_by_part, "product_id", "Bioshock")
+# tf_idf_plot(bioshock.words_by_gameplay, "gameplay", "Bioshock")
+
+
+magicka.unnested <- magicka %>% 
+  unnest_tokens(word, text) %>%
+  filter(str_detect(word, "[a-z']$"),
+         !word %in% stop_words$word)
+
+magicka.words_by_part <- magicka.unnested %>%
+  count(product_id, word, sort = TRUE) %>%
+  ungroup()
+
+magicka.words_by_recommend <- magicka.unnested %>%
+  count(recommended, word, sort = TRUE) %>%
+  ungroup()
+
+magicka.words_by_gameplay <- magicka.unnested %>%
+  count(gameplay, word, sort = TRUE) %>%
+  ungroup()
+
+
+tf_idf_plot(magicka.words_by_recommend, "recommended", "Magicka")
+tf_idf_plot(magicka.words_by_part, "product_id", "Magicka")
+# tf_idf_plot(magicka.words_by_gameplay, "gameplay", "Magicka")
+
+
+
+dn.unnested <- dn %>% 
+  unnest_tokens(word, text) %>%
+  filter(str_detect(word, "[a-z']$"),
+         !word %in% stop_words$word)
+
+dn.words_by_part <- dn.unnested %>%
+  count(product_id, word, sort = TRUE) %>%
+  ungroup()
+
+dn.words_by_recommend <- dn.unnested %>%
+  count(recommended, word, sort = TRUE) %>%
+  ungroup()
+
+dn.words_by_gameplay <- dn.unnested %>%
+  count(gameplay, word, sort = TRUE) %>%
+  ungroup()
+
+
+tf_idf_plot(dn.words_by_recommend, "recommended", "Duke Nukem")
+tf_idf_plot(dn.words_by_part, "product_id", "Duke Nukem")
+# tf_idf_plot(dn.words_by_gameplay, "gameplay", "Duke Nukem")
+
+```
+
+
+It is also very proficient to see how does the average sentiment shape through the various groups. For Syberia, it seems that the more positive reviews are given to the original, but the difference is not that high - both the games are positively received. The recommendation highly diversifies the sentiment - reviews that are not recommending the game are usually getting negative sentiment scores. On the other hand, Mass Effect and Mafia have more positive scores for the sequel! For Mafia the difference is huge (Mafia 2 was very well received game). On the other hand the difference between not recommending and recommending sentiment is not that high. Bioshock 1 was a little bit better than Bioshock 2, but the highest differences that we can observe belong to both Magicka and Duke Nukem.
+
+We did not see any interesting facts within the gameplay divisions - we thought the more you played the game the more you liked it, but the number of hours that people play the game made the intervals very dispersed. 
+
+```{r, fig.height=4, fig.width=3, message=FALSE, warning=FALSE} 
+aveSent(syberia.words_by_part, "product_id", "Syberia")
+aveSent(syberia.words_by_recommend, "recommended", "Syberia")
+# aveSent(syberia.words_by_gameplay, "gameplay", "Syberia")
+ 
+aveSent(me.words_by_part, "product_id", "Mass Effect")
+aveSent(me.words_by_recommend, "recommended", "Mass Effect")
+# aveSent(me.words_by_gameplay, "gameplay", "Mass Effect")
+
+aveSent(mafia.words_by_part, "product_id", "Mafia")
+aveSent(mafia.words_by_recommend, "recommended", "Mafia")
+# aveSent(mafia.words_by_gameplay, "gameplay", "Mafia")
+
+aveSent(bioshock.words_by_part, "product_id", "Bioshock")
+aveSent(bioshock.words_by_recommend, "recommended", "Bioshock")
+# aveSent(bioshock.words_by_gameplay, "gameplay", "Bioshock")
+
+aveSent(magicka.words_by_part, "product_id", "Magicka")
+aveSent(magicka.words_by_recommend, "recommended", "Magicka")
+# aveSent(magicka.words_by_gameplay, "gameplay", "Magicka")
+
+aveSent(dn.words_by_part, "product_id", "Duke Nukem")
+aveSent(dn.words_by_recommend, "recommended", "Duke Nukem")
+# aveSent(dn.words_by_gameplay, "gameplay", "Duke Nukem")
+```
+
+It is also very relevant to see which words exactly shape the sentiment scores for each of the games. *Adventure* is the most important word for positive sentiment in each of the games, *fun*, *amazing*, *recommend*, *love* and *beautiful* follow up. *Bad*, *boring* and *annoying* do decrease the sentiment though. *Masterpiece* shows up for Mass Effect. Sometimes the algorithm messes up, e.g. it says that *combat* decreases the score, but it is just a part of the game. *bad* is one of the most frequent words that decrease the sentiment. There are some words that are only describing the gameplay, like *death* or *kiling*, but they decrease the sentiment. 
+
+
+```{r, fig.height=4, fig.width=3, message=FALSE, warning=FALSE} 
+
+contToSent(syberia.unnested, "Syberia")
+contToSent(me.unnested, "Mass Effect")
+contToSent(mafia.unnested, "Mafia")
+contToSent(bioshock.unnested, "Bioshock")
+contToSent(magicka.unnested, "Magicka")
+contToSent(dn.unnested, "Duke Nukem")
+
+```
+
+
+## Bigram and trigram analysis
+
+Coming towards the end of the report we would like to present how does the two- or three- word -grams behave in the dataset.
+
+```{r bi_prep, message=FALSE, warning=FALSE, include=FALSE}
+syberia.bigrams <- syberia %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+syberia.trigrams <- syberia %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+
+syberia.bigrams %<>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word)
+
+syberia.trigrams %<>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word3 %in% stop_words$word)
+
+me.bigrams <- me %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+me.trigrams <- me %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+
+me.bigrams %<>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word)
+
+me.trigrams %<>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word3 %in% stop_words$word)
+
+mafia.bigrams <- mafia %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+mafia.trigrams <- mafia %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+
+mafia.bigrams %<>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word)
+
+mafia.trigrams %<>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word3 %in% stop_words$word)
+
+
+bioshock.bigrams <- bioshock %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+bioshock.trigrams <- bioshock %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+
+bioshock.bigrams %<>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word)
+
+bioshock.trigrams %<>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word3 %in% stop_words$word)
+
+magicka.bigrams <- magicka %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+magicka.trigrams <- magicka %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+
+magicka.bigrams %<>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word)
+
+magicka.trigrams %<>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word3 %in% stop_words$word)
+
+
+dn.bigrams <- dn %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+dn.trigrams <- dn %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3)
+
+dn.bigrams %<>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word)
+
+dn.trigrams %<>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word3 %in% stop_words$word)
+
+
+syb.tbl2 <- syberia.bigrams %>%
+  count(product_id, word1, word2, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(5) %>% 
+  filter(!is.na(word1))
+syb.tbl3 <- syberia.trigrams %>%
+  count(product_id, word1, word2, word3, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(6) %>% 
+  filter(!is.na(word1))
+
+me.tbl2 <- me.bigrams %>%
+  count(product_id, word1, word2, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(5) %>% 
+  filter(!is.na(word1))
+
+me.tbl3 <- me.trigrams %>%
+  count(product_id, word1, word2, word3, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(6) %>% 
+  filter(!is.na(word1))
+
+
+mafia.tbl2 <- mafia.bigrams %>%
+  count(product_id, word1, word2, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(5) %>% 
+  filter(!is.na(word1))
+
+mafia.tbl3 <- mafia.trigrams %>%
+  count(product_id, word1, word2, word3, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(6) %>% 
+  filter(!is.na(word1)) %>% 
+  head(10)
+
+
+bio.tbl2 <- bioshock.bigrams %>%
+  count(product_id, word1, word2, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(6) %>% 
+  filter(!is.na(word1)) %>% 
+  head(10)
+
+bio.tbl3 <- bioshock.trigrams %>%
+  count(product_id, word1, word2, word3, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(6) %>% 
+  filter(!is.na(word1))
+
+
+mag.tbl2 <- magicka.bigrams %>%
+  count(product_id, word1, word2, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(6) %>% 
+  filter(!is.na(word1))
+mag.tbl3 <- magicka.trigrams %>%
+  count(product_id, word1, word2, word3, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(6) %>% 
+  filter(!is.na(word1))
+
+
+dn.tbl2 <- dn.bigrams %>%
+  count(product_id, word1, word2, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(5) %>% 
+  filter(!is.na(word1))
+dn.tbl3 <- dn.trigrams %>%
+  count(product_id, word1, word2, word3, sort = TRUE) %>% 
+  group_by(product_id) %>% 
+  top_n(6) %>% 
+  filter(!is.na(word1))%>% 
+  head(10)
+```
+
+```{r}
+
+cbind(syb.tbl2, me.tbl2, mafia.tbl2) %>%  kable("latex", col.names = NULL)  %>% #, caption = "Number of reviews for each of the considered games"
+  add_header_above(c("Syberia" = 4, "Mass Effect" = 4, "Mafia" = 4)) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+cbind(bio.tbl2, mag.tbl2, dn.tbl2) %>%  kable("latex", col.names = NULL)  %>% #, caption = "Number of reviews for each of the considered games"
+  add_header_above(c("Bioshock" = 4, "Magicka" = 4, "Duke Nukem" = 4)) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+cbind(syb.tbl3, me.tbl3, mafia.tbl3) %>%  kable("latex", col.names = NULL)  %>% #, caption = "Number of reviews for each of the considered games"
+  add_header_above(c("Syberia" = 5, "Mass Effect" = 5, "Mafia" = 5)) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+cbind(bio.tbl3, mag.tbl3, dn.tbl3) %>%  kable("latex", col.names = NULL)  %>% #, caption = "Number of reviews for each of the considered games"
+  add_header_above(c("Bioshock" = 5, "Magicka" = 5, "Duke Nukem" = 5)) %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+As we can already seen there are several interesting bigrams and trigrams in the reviews. Most importantly the originals and the sequels names appear in both of the reviews (e.g. *syberia ii* in Syberia 1 reviews). This means that most of the reviewers played both of the games. Another coappearing words are names of the main heroes - *kate walker* or *vito scaletta*. In Mass Effect reviews there is also something about *voice acting*. *Underwater city* in the Bioshock is just a name of the set where it all takes place. A funny thing is appearance of *friendly fire* in Magicka bigrams, as the game does allow you to kill your own party members. 
+
+The trigrams are similar in that manner, i. a.  they do have the game names as the most appearing ngrams. There are some other game names, e.g. Grand Theft Auto in comparison with Mafia. Trigram *pre rendered backgrounds* in Syberia games might shed some light to the artistic side of the game. Mass effect reviews are unfortunately not that interesting due to one fact - game name has already two words, which makes it a little more troubling. Names of DLC (downloadable content) do appear as the common bigrams, so the fact is that the players review also some expansion packs. People really liked *spell casting system*, which allows you to throw *lightning bolts* in Magicka. And there's also somehting disturbing about *rock* being so popular in Magicka reviews. 
+
+
+```{r, fig.height=3, fig.width=6, message=FALSE, warning=FALSE} 
+ 
+mostCommonBigrams(syberia.bigrams, "product_id", "Syberia")
+mostCommonBigrams(syberia.bigrams, "recommended", "Syberia")
+# mostCommonBigrams(syberia.bigrams, "gameplay", "Syberia")
+ 
+mostCommonTrigrams(syberia.trigrams, "product_id", "Syberia")
+mostCommonTrigrams(syberia.trigrams, "recommended", "Syberia")
+# mostCommonTrigrams(syberia.trigrams, "gameplay", "Syberia")
+
+mostCommonBigrams(me.bigrams, "product_id", "Mass Effect")
+mostCommonBigrams(me.bigrams, "recommended", "Mass Effect")
+# mostCommonBigrams(me.bigrams, "gameplay", "Mass Effect")
+
+mostCommonTrigrams(me.trigrams, "product_id", "Mass Effect")
+# mostCommonTrigrams(me.trigrams, "recommended", "Mass Effect")
+# mostCommonTrigrams(me.trigrams, "gameplay", "Mass Effect")
+
+mostCommonBigrams(mafia.bigrams, "product_id", "Mafia")
+mostCommonBigrams(mafia.bigrams, "recommended", "Mafia")
+# mostCommonBigrams(mafia.bigrams, "gameplay", "Mafia")
+
+mostCommonTrigrams(mafia.trigrams, "product_id", "Mafia")
+mostCommonTrigrams(mafia.trigrams, "recommended", "Mafia")
+# mostCommonTrigrams(mafia.trigrams, "gameplay", "Mafia")
+
+mostCommonBigrams(bioshock.bigrams, "product_id", "Bioshock")
+mostCommonBigrams(bioshock.bigrams, "recommended", "Bioshock")
+# mostCommonBigrams(bioshock.bigrams, "gameplay", "Bioshock")
+
+mostCommonTrigrams(bioshock.trigrams, "product_id", "Bioshock")
+mostCommonTrigrams(bioshock.trigrams, "recommended", "Bioshock")
+# mostCommonTrigrams(bioshock.trigrams, "gameplay", "Bioshock")
+
+
+mostCommonBigrams(magicka.bigrams, "product_id", "Magicka")
+mostCommonBigrams(magicka.bigrams, "recommended", "Magicka")
+# mostCommonBigrams(magicka.bigrams, "gameplay", "Magicka")
+
+mostCommonTrigrams(magicka.trigrams, "product_id", "Magicka")
+mostCommonTrigrams(magicka.trigrams, "recommended", "Magicka")
+# mostCommonTrigrams(magicka.trigrams, "gameplay", "Magicka")
+
+
+mostCommonBigrams(dn.bigrams, "product_id", "Duke Nukem")
+mostCommonBigrams(dn.bigrams, "recommended", "Duke Nukem")
+# mostCommonBigrams(dn.bigrams, "gameplay", "Duke Nukem")
+
+mostCommonTrigrams(dn.trigrams, "product_id", "Duke Nukem")
+mostCommonTrigrams(dn.trigrams, "recommended", "Duke Nukem")
+# mostCommonTrigrams(dn.trigrams, "gameplay", "Duke Nukem")
+
+```
+
+Going deeper we can always divide the most ocurring ngrams into the categorical variables. Adding to the previous conclusions (we have excluded meaningless charts), there are some bigrams that say e.g. *10 10*, which means that some people have given the game 10! People do like to mention character names in the reviews, e.g. *hans voralberg*, *kate walker*. Nice reference to *suicide simulator* in Magicka reviews. Also, an easter egg - *hey vito hey* ;)
+
+```{r, fig.height=3, fig.width=6, message=FALSE, warning=FALSE} 
+
+TFIDF_bigram(syberia.bigrams, "product_id", "Syberia") 
+TFIDF_bigram(syberia.bigrams, "recommended", "Syberia")
+
+TFIDF_bigram(me.bigrams, "product_id", "Mass Effect")
+TFIDF_bigram(me.bigrams, "recommended", "Mass Effect")
+
+TFIDF_bigram(mafia.bigrams, "product_id", "Mafia")
+TFIDF_bigram(mafia.bigrams, "recommended", "Mafia")
+
+TFIDF_bigram(bioshock.bigrams, "product_id", "Bioshock")
+TFIDF_bigram(bioshock.bigrams, "recommended", "Bioshock")
+
+TFIDF_bigram(magicka.bigrams, "product_id", "Magicka")
+TFIDF_bigram(magicka.bigrams, "recommended", "Magicka")
+
+TFIDF_bigram(dn.bigrams, "product_id", "Duke Nukem")
+TFIDF_bigram(dn.bigrams, "recommended", "Duke Nukem")
+
+```
+
+Let's dwell into something more interesting - bigrams' impact. This says much more about the game. Starting off with Syberia - many references to the *previous game*, *improvements*, better *graphics* and *character animations* and a *classic adventure game*. On the other hand, bigrams like *game sucks* or *1/5* really impact the recommendation. For Mass Effect, people liked that it resempled *classic rpgs*, *game upgrades*, an *amazing story* and several heroes (*wrex*) and yet some people reviewed it as an *awful game*. People really liked *vito scaletta* - main hero of Mafia 2. Apart from that it seems that its resemblance to *gta iv*, *gta series* is impactful. They didn't really like the *cutscenes*, *shooting* and *bugs*. Bioshock - people liked a special move in the game: *dash drill*, but some bugs still annoyed them. Magicka 1 was liked for being an *indie game*, but there were some bugs, that people played for only *10 mins*. Duke Nukem was named *fun shooter*, but on the other hand it *felt ripped* and the *levels were boring*. 
+
+```{r, fig.height=3, fig.width=3, message=FALSE, warning=FALSE} 
+
+preceedingBigram(syberia, "very", "Syberia")
+preceedingBigram(syberia, "good", "Syberia") 
+  
+
+preceedingBigram(me, "very", "Mass Effect")
+preceedingBigram(me, "good", "Mass Effect")
+
+preceedingBigram(mafia, "very", "Mafia")
+preceedingBigram(mafia, "good", "Mafia")
+
+preceedingBigram(bioshock, "very", "Bioshock")
+preceedingBigram(bioshock, "good", "Bioshock")
+
+preceedingBigram(magicka, "very", "Magicka")
+preceedingBigram(magicka, "good", "Magicka")
+
+preceedingBigram(dn, "very", "Duke Nukem")
+preceedingBigram(dn, "good", "Duke Nukem")
+```
+
+We have also checked whether preceeding words like *very* and *good* should impact the sentiment calculations. For each of the games there are little words that change the meaning with very, but the dispersion should be higher - if something is **very** annoying or difficult - it is no good. On the other hand some words following good like *problem*, *combat*, or *challenge*, that should not have negative sentiment. There are also a lot of comments about good *humour*, *jokes* or *story*.
+
+## Models for classification
+
+We have also prepared several models that will be trained to guess, based on the words in a given review, whether someone recommended the game or not. Models used are: kNN, SVM and Naive Bayes. Below we present the testing sample results of accuracy for each of the models. We have also used hypertuning, upsampling and cross-validation.
+
+```{r message=FALSE, warning=FALSE}
+syberia1.df <- cbind(as.data.frame(data.matrix(syberia1.DTM), stringsAsfactors = FALSE), as.factor(syberia1.orig$recommended))
+syberia2.df <- cbind(as.data.frame(data.matrix(syberia2.DTM), stringsAsfactors = FALSE), as.factor(syberia2.orig$recommended))
+colnames(syberia1.df)[ncol(syberia1.df)] <- "Recommended"
+colnames(syberia2.df)[ncol(syberia2.df)] <- "Recommended"
+
+set.seed(2137)
+syberia1.part <- createDataPartition(syberia1.df$Recommended, p = 0.8, list = F)
+syberia2.part <- createDataPartition(syberia2.df$Recommended, p = 0.8, list = F)
+
+syberia1.train <- syberia1.df[syberia1.part, c(colSums(syberia1.df[, -ncol(syberia1.df)]) > 0.8*0.025*nrow(syberia1.df), T)]
+syberia1.test <- syberia1.df[-syberia1.part, c(colSums(syberia1.df[, -ncol(syberia1.df)]) > 0.8*0.025*nrow(syberia1.df), T)]
+
+syberia2.train <- syberia2.df[syberia2.part, c(colSums(syberia2.df[, -ncol(syberia2.df)]) > 0.8*0.025*nrow(syberia2.df), T)]
+syberia2.test <- syberia2.df[-syberia2.part, c(colSums(syberia2.df[, -ncol(syberia2.df)]) > 0.8*0.025*nrow(syberia2.df), T)]
+
+
+syberia1.train <- upSample(syberia1.train, syberia1.train$Recommended)
+syberia2.train <- upSample(syberia2.train, syberia2.train$Recommended)
+
+syberia1.train$Class <- NULL
+syberia2.train$Class <- NULL
+
+knn.grid <-  expand.grid(k = 10:20)
+
+# SYBERIA 1
+knn.model1 <- train(Recommended ~ . ,
+                    data = syberia1.train,
+                    method = "knn",
+                    tuneGrid = knn.grid)
+
+# SYBERIA 2
+knn.model2 <- train(Recommended ~ . ,
+                   data = syberia2.train,
+                   method = "knn",
+                   tuneGrid = knn.grid)
+
+
+syberia1.knn.pred <- predict(knn.model1, syberia1.test)
+syberia2.knn.pred <- predict(knn.model2, syberia2.test)
+
+#----------------------------------
+
+# SYBERIA 1
+svm.model1 <- train(Recommended ~ . ,
+                    data = syberia1.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+# SYBERIA 2
+svm.model2 <- train(Recommended ~ . ,
+                    data = syberia2.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+
+syberia1.svm.pred <- predict(svm.model1, syberia1.test)
+syberia2.svm.pred <- predict(svm.model2, syberia2.test)
+
+#----------------------------------
+
+# SYBERIA 1
+nb.model1 <- train(Recommended ~ . ,
+                    data = syberia1.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+# SYBERIA 2
+nb.model2 <- train(Recommended ~ . ,
+                    data = syberia2.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+
+syberia1.nb.pred <- predict(nb.model1, syberia1.test)
+syberia2.nb.pred <- predict(nb.model2, syberia2.test)
+
+
+
+
+```
+
+
+```{r message=FALSE, warning=FALSE}
+me1.df <- cbind(as.data.frame(data.matrix(me1.DTM), stringsAsfactors = FALSE), as.factor(me1.orig$recommended))
+me2.df <- cbind(as.data.frame(data.matrix(me2.DTM), stringsAsfactors = FALSE), as.factor(me2.orig$recommended))
+colnames(me1.df)[ncol(me1.df)] <- "Recommended"
+colnames(me2.df)[ncol(me2.df)] <- "Recommended"
+
+set.seed(2137)
+me1.df.cut <- me1.df[sample(nrow(me1.df), 1250), ]
+me2.df.cut <- me2.df[sample(nrow(me2.df), 1250), ]
+
+me1.part <- createDataPartition(me1.df.cut$Recommended, p = 0.8, list = F)
+me2.part <- createDataPartition(me1.df.cut$Recommended, p = 0.8, list = F)
+
+me1.train <- me1.df.cut[me1.part, c(colSums(me1.df.cut[, -ncol(me1.df.cut)]) > 0.8*0.025*nrow(me1.df.cut), T)]
+me1.test <- me1.df.cut[-me1.part, c(colSums(me1.df.cut[, -ncol(me1.df.cut)]) > 0.8*0.025*nrow(me1.df.cut), T)]
+
+me2.train <- me2.df.cut[me2.part, c(colSums(me2.df.cut[, -ncol(me2.df.cut)]) > 0.8*0.025*nrow(me2.df.cut), T)]
+me2.test <- me2.df.cut[-me2.part, c(colSums(me2.df.cut[, -ncol(me2.df.cut)]) > 0.8*0.025*nrow(me2.df.cut), T)]
+
+me1.train <- upSample(me1.train, me1.train$Recommended)
+me2.train <- upSample(me2.train, me2.train$Recommended)
+
+me1.train$Class <- NULL
+me2.train$Class <- NULL
+
+knn.grid <-  expand.grid(k = 10:20)
+
+# me 1
+knn.model1 <- train(Recommended ~ . ,
+                    data = me1.train,
+                    method = "knn",
+                    tuneGrid = knn.grid)
+
+# me 2
+knn.model2 <- train(Recommended ~ . ,
+                   data = me2.train,
+                   method = "knn",
+                   tuneGrid = knn.grid)
+
+
+me1.knn.pred <- predict(knn.model1, me1.test)
+me2.knn.pred <- predict(knn.model2, me2.test)
+
+#----------------------------------
+
+# me 1
+svm.model1 <- train(Recommended ~ . ,
+                    data = me1.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+# me 2
+svm.model2 <- train(Recommended ~ . ,
+                    data = me2.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+
+me1.svm.pred <- predict(svm.model1, me1.test)
+me2.svm.pred <- predict(svm.model2, me2.test)
+
+#----------------------------------
+
+# me 1
+nb.model1 <- train(Recommended ~ . ,
+                    data = me1.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+# me 2
+nb.model2 <- train(Recommended ~ . ,
+                    data = me2.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+
+me1.nb.pred <- predict(nb.model1, me1.test)
+me2.nb.pred <- predict(nb.model2, me2.test)
+
+
+```
+
+```{r message=FALSE, warning=FALSE}
+mafia1.df <- cbind(as.data.frame(data.matrix(mafia1.DTM), stringsAsfactors = FALSE), as.factor(mafia1.orig$recommended))
+mafia2.df <- cbind(as.data.frame(data.matrix(mafia2.DTM), stringsAsfactors = FALSE), as.factor(mafia2.orig$recommended))
+colnames(mafia1.df)[ncol(mafia1.df)] <- "Recommended"
+colnames(mafia2.df)[ncol(mafia2.df)] <- "Recommended"
+
+set.seed(2137)
+mafia1.df.cut <- mafia1.df
+mafia2.df.cut <- mafia2.df[sample(nrow(mafia2.df), 1250), ]
+
+mafia1.part <- createDataPartition(mafia1.df.cut$Recommended, p = 0.8, list = F)
+mafia2.part <- createDataPartition(mafia2.df.cut$Recommended, p = 0.8, list = F)
+
+mafia1.train <- mafia1.df.cut[mafia1.part, c(colSums(mafia1.df.cut[, -ncol(mafia1.df.cut)]) > 0.8*0.025*nrow(mafia1.df.cut), T)]
+mafia1.test <- mafia1.df.cut[-mafia1.part, c(colSums(mafia1.df.cut[, -ncol(mafia1.df.cut)]) > 0.8*0.025*nrow(mafia1.df.cut), T)]
+
+mafia2.train <- mafia2.df.cut[mafia2.part, c(colSums(mafia2.df.cut[, -ncol(mafia2.df.cut)]) > 0.8*0.025*nrow(mafia2.df.cut), T)]
+mafia2.test <- mafia2.df.cut[-mafia2.part, c(colSums(mafia2.df.cut[, -ncol(mafia2.df.cut)]) > 0.8*0.025*nrow(mafia2.df.cut), T)]
+
+
+mafia1.train <- upSample(mafia1.train, mafia1.train$Recommended)
+mafia2.train <- upSample(mafia2.train, mafia2.train$Recommended)
+
+mafia1.train$Class <- NULL
+mafia2.train$Class <- NULL
+
+knn.grid <-  expand.grid(k = 10:20)
+
+# mafia 1
+knn.model1 <- train(Recommended ~ . ,
+                    data = mafia1.train,
+                    method = "knn",
+                    tuneGrid = knn.grid)
+
+# mafia 2
+knn.model2 <- train(Recommended ~ . ,
+                   data = mafia2.train,
+                   method = "knn",
+                   tuneGrid = knn.grid)
+
+
+mafia1.knn.pred <- predict(knn.model1, mafia1.test)
+mafia2.knn.pred <- predict(knn.model2, mafia2.test)
+
+#----------------------------------
+
+# mafia 1
+svm.model1 <- train(Recommended ~ . ,
+                    data = mafia1.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+# mafia 2
+svm.model2 <- train(Recommended ~ . ,
+                    data = mafia2.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+
+mafia1.svm.pred <- predict(svm.model1, mafia1.test)
+mafia2.svm.pred <- predict(svm.model2, mafia2.test)
+
+#----------------------------------
+
+# mafia 1
+nb.model1 <- train(Recommended ~ . ,
+                    data = mafia1.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+# mafia 2
+nb.model2 <- train(Recommended ~ . ,
+                    data = mafia2.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+
+mafia1.nb.pred <- predict(nb.model1, mafia1.test)
+mafia2.nb.pred <- predict(nb.model2, mafia2.test)
+
+
+
+
+```
+
+```{r message=FALSE, warning=FALSE}
+bioshock1.df <- cbind(as.data.frame(data.matrix(bioshock1.DTM), stringsAsfactors = FALSE), as.factor(bioshock1.orig$recommended))
+bioshock2.df <- cbind(as.data.frame(data.matrix(bioshock2.DTM), stringsAsfactors = FALSE), as.factor(bioshock2.orig$recommended))
+colnames(bioshock1.df)[ncol(bioshock1.df)] <- "Recommended"
+colnames(bioshock2.df)[ncol(bioshock2.df)] <- "Recommended"
+
+set.seed(2137)
+bioshock1.df.cut <- bioshock1.df[sample(nrow(bioshock1.df), 1250), ]
+bioshock2.df.cut <- bioshock2.df[sample(nrow(bioshock2.df), 1250), ]
+
+bioshock1.part <- createDataPartition(bioshock1.df.cut$Recommended, p = 0.8, list = F)
+bioshock2.part <- createDataPartition(bioshock2.df.cut$Recommended, p = 0.8, list = F)
+
+bioshock1.train <- bioshock1.df.cut[bioshock1.part, c(colSums(bioshock1.df.cut[, -ncol(bioshock1.df.cut)]) > 0.8*0.025*nrow(bioshock1.df.cut), T)]
+bioshock1.test <- bioshock1.df.cut[-bioshock1.part, c(colSums(bioshock1.df.cut[, -ncol(bioshock1.df.cut)]) > 0.8*0.025*nrow(bioshock1.df.cut), T)]
+
+bioshock2.train <- bioshock2.df.cut[bioshock2.part, c(colSums(bioshock2.df.cut[, -ncol(bioshock2.df.cut)]) > 0.8*0.025*nrow(bioshock2.df.cut), T)]
+bioshock2.test <- bioshock2.df.cut[-bioshock2.part, c(colSums(bioshock2.df.cut[, -ncol(bioshock2.df.cut)]) > 0.8*0.025*nrow(bioshock2.df.cut), T)]
+
+
+bioshock1.train <- upSample(bioshock1.train, bioshock1.train$Recommended)
+bioshock2.train <- upSample(bioshock2.train, bioshock2.train$Recommended)
+
+bioshock1.train$Class <- NULL
+bioshock2.train$Class <- NULL
+
+knn.grid <-  expand.grid(k = 10:20)
+
+# bioshock 1
+knn.model1 <- train(Recommended ~ . ,
+                    data = bioshock1.train,
+                    method = "knn",
+                    tuneGrid = knn.grid)
+
+# bioshock 2
+knn.model2 <- train(Recommended ~ . ,
+                   data = bioshock2.train,
+                   method = "knn",
+                   tuneGrid = knn.grid)
+
+
+bioshock1.knn.pred <- predict(knn.model1, bioshock1.test)
+bioshock2.knn.pred <- predict(knn.model2, bioshock2.test)
+
+#----------------------------------
+
+# bioshock 1
+svm.model1 <- train(Recommended ~ . ,
+                    data = bioshock1.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+# bioshock 2
+svm.model2 <- train(Recommended ~ . ,
+                    data = bioshock2.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+
+bioshock1.svm.pred <- predict(svm.model1, bioshock1.test)
+bioshock2.svm.pred <- predict(svm.model2, bioshock2.test)
+
+#----------------------------------
+
+# bioshock 1
+nb.model1 <- train(Recommended ~ . ,
+                    data = bioshock1.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+# bioshock 2
+nb.model2 <- train(Recommended ~ . ,
+                    data = bioshock2.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+
+bioshock1.nb.pred <- predict(nb.model1, bioshock1.test)
+bioshock2.nb.pred <- predict(nb.model2, bioshock2.test)
+
+
+
+
+```
+
+```{r message=FALSE, warning=FALSE}
+magicka1.df <- cbind(as.data.frame(data.matrix(magicka1.DTM), stringsAsfactors = FALSE), as.factor(magicka1.orig$recommended))
+magicka2.df <- cbind(as.data.frame(data.matrix(magicka2.DTM), stringsAsfactors = FALSE), as.factor(magicka2.orig$recommended))
+colnames(magicka1.df)[ncol(magicka1.df)] <- "Recommended"
+colnames(magicka2.df)[ncol(magicka2.df)] <- "Recommended"
+
+set.seed(2137)
+magicka1.df.cut <- magicka1.df[sample(nrow(magicka1.df), 1250), ]
+magicka2.df.cut <- magicka2.df[sample(nrow(magicka2.df), 1250), ]
+
+magicka1.part <- createDataPartition(magicka1.df.cut$Recommended, p = 0.8, list = F)
+magicka2.part <- createDataPartition(magicka2.df.cut$Recommended, p = 0.8, list = F)
+
+magicka1.train <- magicka1.df.cut[magicka1.part, c(colSums(magicka1.df.cut[, -ncol(magicka1.df.cut)]) > 0.8*0.025*nrow(magicka1.df.cut), T)]
+magicka1.test <- magicka1.df.cut[-magicka1.part, c(colSums(magicka1.df.cut[, -ncol(magicka1.df.cut)]) > 0.8*0.025*nrow(magicka1.df.cut), T)]
+
+magicka2.train <- magicka2.df.cut[magicka2.part, c(colSums(magicka2.df.cut[, -ncol(magicka2.df.cut)]) > 0.8*0.025*nrow(magicka2.df.cut), T)]
+magicka2.test <- magicka2.df.cut[-magicka2.part, c(colSums(magicka2.df.cut[, -ncol(magicka2.df.cut)]) > 0.8*0.025*nrow(magicka2.df.cut), T)]
+
+
+magicka1.train <- upSample(magicka1.train, magicka1.train$Recommended)
+magicka2.train <- upSample(magicka2.train, magicka2.train$Recommended)
+
+magicka1.train$Class <- NULL
+magicka2.train$Class <- NULL
+
+knn.grid <-  expand.grid(k = 10:20)
+
+# magicka 1
+knn.model1 <- train(Recommended ~ . ,
+                    data = magicka1.train,
+                    method = "knn",
+                    tuneGrid = knn.grid)
+
+# magicka 2
+knn.model2 <- train(Recommended ~ . ,
+                   data = magicka2.train,
+                   method = "knn",
+                   tuneGrid = knn.grid)
+
+
+magicka1.knn.pred <- predict(knn.model1, magicka1.test)
+magicka2.knn.pred <- predict(knn.model2, magicka2.test)
+
+#----------------------------------
+
+# magicka 1
+svm.model1 <- train(Recommended ~ . ,
+                    data = magicka1.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+# magicka 2
+svm.model2 <- train(Recommended ~ . ,
+                    data = magicka2.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+
+magicka1.svm.pred <- predict(svm.model1, magicka1.test)
+magicka2.svm.pred <- predict(svm.model2, magicka2.test)
+
+#----------------------------------
+
+# magicka 1
+nb.model1 <- train(Recommended ~ . ,
+                    data = magicka1.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+# magicka 2
+nb.model2 <- train(Recommended ~ . ,
+                    data = magicka2.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+
+magicka1.nb.pred <- predict(nb.model1, magicka1.test)
+magicka2.nb.pred <- predict(nb.model2, magicka2.test)
+
+
+
+
+```
+
+```{r message=FALSE, warning=FALSE}
+dn1.df <- cbind(as.data.frame(data.matrix(dn1.DTM), stringsAsfactors = FALSE), as.factor(dn1.orig$recommended))
+dn2.df <- cbind(as.data.frame(data.matrix(dn2.DTM), stringsAsfactors = FALSE), as.factor(dn2.orig$recommended))
+colnames(dn1.df)[ncol(dn1.df)] <- "Recommended"
+colnames(dn2.df)[ncol(dn2.df)] <- "Recommended"
+
+set.seed(2137)
+dn1.df.cut <- dn1.df
+dn2.df.cut <- dn2.df[sample(nrow(dn2.df), 1250), ]
+
+dn1.part <- createDataPartition(dn1.df.cut$Recommended, p = 0.8, list = F)
+dn2.part <- createDataPartition(dn2.df.cut$Recommended, p = 0.8, list = F)
+
+dn1.train <- dn1.df.cut[dn1.part, c(colSums(dn1.df.cut[, -ncol(dn1.df.cut)]) > 0.8*0.025*nrow(dn1.df.cut), T)]
+dn1.test <- dn1.df.cut[-dn1.part, c(colSums(dn1.df.cut[, -ncol(dn1.df.cut)]) > 0.8*0.025*nrow(dn1.df.cut), T)]
+
+dn2.train <- dn2.df.cut[dn2.part, c(colSums(dn2.df.cut[, -ncol(dn2.df.cut)]) > 0.8*0.025*nrow(dn2.df.cut), T)]
+dn2.test <- dn2.df.cut[-dn2.part, c(colSums(dn2.df.cut[, -ncol(dn2.df.cut)]) > 0.8*0.025*nrow(dn2.df.cut), T)]
+
+dn1.train <- upSample(dn1.train, dn1.train$Recommended)
+dn2.train <- upSample(dn2.train, dn2.train$Recommended)
+
+dn1.train$Class <- NULL
+dn2.train$Class <- NULL
+
+knn.grid <-  expand.grid(k = 10:20)
+
+# dn 1
+knn.model1 <- train(Recommended ~ . ,
+                    data = dn1.train,
+                    method = "knn",
+                    tuneGrid = knn.grid)
+
+# dn 2
+knn.model2 <- train(Recommended ~ . ,
+                   data = dn2.train,
+                   method = "knn",
+                   tuneGrid = knn.grid)
+
+
+dn1.knn.pred <- predict(knn.model1, dn1.test)
+dn2.knn.pred <- predict(knn.model2, dn2.test)
+
+#----------------------------------
+
+# dn 1
+svm.model1 <- train(Recommended ~ . ,
+                    data = dn1.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+# dn 2
+svm.model2 <- train(Recommended ~ . ,
+                    data = dn2.train,
+                    method = "svmLinear",
+                    preProcess = c("center", "scale"))
+
+
+dn1.svm.pred <- predict(svm.model1, dn1.test)
+dn2.svm.pred <- predict(svm.model2, dn2.test)
+
+#----------------------------------
+
+# dn 1
+nb.model1 <- train(Recommended ~ . ,
+                    data = dn1.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+# dn 2
+nb.model2 <- train(Recommended ~ . ,
+                    data = dn2.train,
+                    method = "nb",
+                    preProcess = c("center", "scale"))
+
+
+dn1.nb.pred <- predict(nb.model1, dn1.test)
+dn2.nb.pred <- predict(nb.model2, dn2.test)
+
+
+
+
+```
+
+
+```{r}
+cbind(c("kNN", "SVM", "Naive Bayes"), 
+      c(sprintf("%2.4f",confusionMatrix(syberia1.test$Recommended, syberia1.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(syberia1.test$Recommended, syberia1.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(syberia1.test$Recommended, syberia1.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(syberia2.test$Recommended, syberia2.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(syberia2.test$Recommended, syberia2.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(syberia2.test$Recommended, syberia2.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(me1.test$Recommended, me1.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(me1.test$Recommended, me1.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(me1.test$Recommended, me1.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(me2.test$Recommended, me2.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(me2.test$Recommended, me2.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(me2.test$Recommended, me2.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(mafia1.test$Recommended, mafia1.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(mafia1.test$Recommended, mafia1.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(mafia1.test$Recommended, mafia1.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(mafia2.test$Recommended, mafia2.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(mafia2.test$Recommended, mafia2.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(mafia2.test$Recommended, mafia2.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(bioshock1.test$Recommended, bioshock1.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(bioshock1.test$Recommended, bioshock1.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(bioshock1.test$Recommended, bioshock1.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(bioshock2.test$Recommended, bioshock2.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(bioshock2.test$Recommended, bioshock2.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(bioshock2.test$Recommended, bioshock2.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(magicka1.test$Recommended, magicka1.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(magicka1.test$Recommended, magicka1.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(magicka1.test$Recommended, magicka1.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(magicka2.test$Recommended, magicka2.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(magicka2.test$Recommended, magicka2.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(magicka2.test$Recommended, magicka2.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(dn1.test$Recommended, dn1.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(dn1.test$Recommended, dn1.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(dn1.test$Recommended, dn1.nb.pred)$byClass["Balanced Accuracy"])),
+      
+      c(sprintf("%2.4f",confusionMatrix(dn2.test$Recommended, dn2.knn.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(dn2.test$Recommended, dn2.svm.pred)$byClass["Balanced Accuracy"]),
+        sprintf("%2.4f",confusionMatrix(dn2.test$Recommended, dn2.nb.pred)$byClass["Balanced Accuracy"]))
+      
+        
+        ) %>% 
+  kable("latex", row.names = F, digits = 2) %>% 
+  add_header_above(c("", "1" = 1, "2" = 1, "1" = 1, "2" = 1, "1" = 1, "2" = 1, "1" = 1, "2" = 1, "1" = 1, "2" = 1, "1" = 1, "2" = 1))%>%
+  add_header_above(c("", "Syberia" = 2, "Mass Effect" = 2, "Mafia" = 2, "Bioshock" = 2, "Magicka" = 2, "Duke Nukem" = 2))  %>%
+  kable_styling(latex_options = c("striped", "scale_down"))
+  
+  
+
+```
+
+As we can see SVM managed to have the best average accuracies. Naive Bayes was sometimes even better, but sometimes tis predictions were worse than wild guess. kNN results are very similiar to the SVM ones, but a little bit off.
+
+## Community detection
+
+There are two top reviewers, each has 7 total reviews, the first having reviewed at least 1 game of each franchise aside from DukeNukem. The second didn't review a Mafia game.
+
+The graphs below show 50 reviewers with most reviews, for a total of 194 reviews between them. All of the 50 reviewers have at least 3 reviews written, some of which are in the same franchise.
+If a pair of reviewers have at least 3 common game franchises reviewed, they are connected on the graph. 
+Using a community detection tool, we recieve a graph with 3 communities that are interconnected, but they show some distinct features.
+
+Overall, of the reviews on the graph, Bioshock is the most reviewed, with 47 reviews between 50 players. DukeNukem comes 2nd with 36 reviews. After that we have Mafia with 24, Magicka with 20 and Syberia with 10.
+
+The community outlined in yellow background, with green dots, mostly reviewed Bioshock, Mafia and Syberia, with some reviewing Magicka and DukeNukem aswell. This group has the only big share of Syberia reviews on the graph, which is its distinct feature compared to the other two.
+
+The community with orange background and blue dots all reviewed Bioshock and DukeNukem, some Magicka and Mafia, but interestingly none of them reviewed Syberia.
+
+The group with red background and orange dots very rarely reviewed Magicka and Syberia, while most of them reviewed the 3 other games.
+
+The outsiders - players who aren't connected to anyone else, have reviews in just 2 franchises, and as such they can't be connected to anyone else as they don't have at least 3 franchises.
+
+The number of connections for this graph is 211 (or 422 if we count both ways seperately, as the relationship is always reciprocal). If we'd reduce the amount of shared games reviewed to 2, the number of connection rises to 800.
+
+```{r}
+ids<-append(syberia[,c("user_id")],bioshock[,c("user_id")])
+ids<-append(ids,dn[,c("user_id")])
+ids<-append(ids,mafia[,c("user_id")])
+ids<-append(ids,magicka[,c("user_id")])
+
+
+
+ids<- ids[!is.na(ids)]
+n_occur <- data.frame(table(ids))
+top100 <-n_occur[order(-n_occur$Freq),]
+top100 <- top100[1:50,]
+top100 <- data.frame(top100)
+
+
+bioshockr <- sapply(top100$ids, function(x) x%in% bioshock$user_id)
+top100 <- cbind(top100,bioshockr)
+mafiar <- sapply(top100$ids, function(x) x%in% mafia$user_id)
+top100 <- cbind(top100,mafiar)
+magickar <- sapply(top100$ids, function(x) x%in% magicka$user_id)
+top100 <- cbind(top100,magickar)
+dukenukemr <- sapply(top100$ids, function(x) x%in% dn$user_id)
+top100 <- cbind(top100,dukenukemr)
+syberiar <- sapply(top100$ids, function(x) x%in% syberia$user_id)
+top100 <- cbind(top100,syberiar)
+
+top100 <- cbind(top100, 1:50)
+
+edges <- c()
+
+for (i in 1:50){
+  for (j in 1:50){
+    a = 0
+    if (i!=j){
+      
+      
+      if (top100$syberiar[i]==TRUE){
+        if (top100$syberiar[j]==TRUE){
+          a=a+1
+        }
+      }
+      if (top100$mafiar[i]==TRUE){
+        if (top100$mafiar[j]==TRUE){
+          a=a+1
+        }
+      }
+      if (top100$bioshockr[i]==TRUE){
+        if (top100$bioshockr[j]==TRUE){
+          a=a+1
+        }
+      }
+      if (top100$magickar[i]==TRUE){
+        if (top100$magickar[j]==TRUE){
+          a=a+1
+        }
+      }
+      if (top100$dukenukemr[i]==TRUE){
+        if (top100$dukenukemr[j]==TRUE){
+          a=a+1
+        }
+      }
+      
+      if (a>2)
+      {
+        new <- c(i,j)
+        edges <- rbind (edges,new)
+        a=0
+      }
+    }
+  }
+}
+
+net <- graph_from_data_frame(d=edges, vertices=1:50, directed=T) 
+
+
+
+#WYKRES 1 
+l <- layout_with_kk(net)
+plot(net, layout=l, edge.arrow.size=.4)
+
+
+#WYKRES 2
+cfg <- cluster_fast_greedy(as.undirected(net))
+plot(cfg, as.undirected(net), layout=layout_with_kk(net))
+```
+
+

@@ -448,30 +448,7 @@ mostCommonTrigrams(syberia.trigrams, "gameplay")
 
 
 
-TFIDF_bigram <- function(bigrams, group) {
-  
-  bigrams %>%
-    unite("bigram", c(word1, word2), sep = " ") %>% 
-    count_(c(group, "bigram"), sort = TRUE) %>%
-    bind_tf_idf_("bigram", group, "n") %>%
-    arrange(desc(tf_idf)) %>% 
-    group_by_(group) %>%
-    top_n(15, wt = tf_idf) %>%
-    ungroup() %>%
-    mutate(groupingVar = factor(get(group)) %>% forcats::fct_rev()) %>%
-    ggplot(aes(drlib::reorder_within(bigram, tf_idf, groupingVar), tf_idf, fill = groupingVar)) +
-    geom_bar(stat = "identity", alpha = .8, show.legend = FALSE) +
-    labs(title = paste0("Highest tf-idf bi-grams divided by: ", group),
-         x = NULL, y = "tf-idf") +
-    drlib::scale_x_reordered() +
-    facet_wrap(~groupingVar, ncol = 2, scales = "free") +
-    coord_flip()
-  
-}
 
-TFIDF_bigram(syberia.bigrams, "product_id")
-TFIDF_bigram(syberia.bigrams, "recommended")
-TFIDF_bigram(syberia.bigrams, "gameplay")
 
 
 preceedingBigram <- function(df, word_) {
